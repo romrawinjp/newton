@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import os
 import sys
@@ -36,16 +24,16 @@ from newton.viewer import ViewerGL
 
 class KpiViewerGL:
     params = (["g1"], [8192])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
     number = 1
     min_run_count = 1
 
-    def setup(self, robot, num_worlds):
+    def setup(self, robot, world_count):
         wp.init()
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         self._model = builder.finalize()
@@ -56,14 +44,14 @@ class KpiViewerGL:
         self.renderer.set_model(self._model)
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_rendering_frame(self, robot, num_worlds):
+    def time_rendering_frame(self, robot, world_count):
         # Rendering one frame
         self.renderer.begin_frame(0.0)
         self.renderer.log_state(self._state)
         self.renderer.end_frame()
         wp.synchronize_device()
 
-    def teardown(self, robot, num_worlds):
+    def teardown(self, robot, world_count):
         self.renderer.close()
         del self.renderer
         del self._model
@@ -72,16 +60,16 @@ class KpiViewerGL:
 
 class FastViewerGL:
     params = (["g1"], [256])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
     number = 1
     min_run_count = 1
 
-    def setup(self, robot, num_worlds):
+    def setup(self, robot, world_count):
         wp.init()
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         self._model = builder.finalize()
@@ -92,14 +80,14 @@ class FastViewerGL:
         self.renderer.set_model(self._model)
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_rendering_frame(self, robot, num_worlds):
+    def time_rendering_frame(self, robot, world_count):
         # Rendering one frame
         self.renderer.begin_frame(0.0)
         self.renderer.log_state(self._state)
         self.renderer.end_frame()
         wp.synchronize_device()
 
-    def teardown(self, robot, num_worlds):
+    def teardown(self, robot, world_count):
         self.renderer.close()
         del self.renderer
         del self._model
@@ -118,7 +106,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        "-b", "--bench", default=None, action="append", choices=benchmark_list.keys(), help="Run a single benchmark."
+        "-b",
+        "--bench",
+        default=None,
+        action="append",
+        choices=benchmark_list.keys(),
+        help="Run a specific benchmark; may be repeated to run multiple (e.g., --bench A --bench B).",
     )
     args = parser.parse_known_args()[0]
 

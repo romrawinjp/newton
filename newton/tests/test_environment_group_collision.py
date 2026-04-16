@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import unittest
 
@@ -106,9 +94,10 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
 
         model = builder.finalize(device=self.device)
         state = model.state()
+        contacts = model.contacts()
 
         # Run collision detection
-        contacts = model.collide(state)
+        model.collide(state, contacts)
 
         # Get soft contact count
         soft_contact_count = int(contacts.soft_contact_count.numpy()[0])
@@ -126,10 +115,10 @@ class TestEnvironmentGroupCollision(unittest.TestCase):
         """Test that add_world correctly assigns world groups."""
         # Create a robot builder
         robot_builder = ModelBuilder()
-        robot_builder.add_body(key="base")
+        robot_builder.add_body(label="base")
         cfg1 = ModelBuilder.ShapeConfig(collision_group=1)
         robot_builder.add_shape_box(body=0, hx=0.5, hy=0.5, hz=0.5, cfg=cfg1)
-        robot_builder.add_body(key="link1")
+        robot_builder.add_body(label="link1")
         cfg2 = ModelBuilder.ShapeConfig(collision_group=2)
         robot_builder.add_shape_capsule(body=1, radius=0.1, half_height=0.5, cfg=cfg2)
 
@@ -349,7 +338,7 @@ class TestWorldGroupBroadphaseKernels(unittest.TestCase):
         for world_a, world_b, col_a, col_b, expected in test_cases:
 
             @wp.kernel
-            def test_kernel(world_a: int, world_b: int, col_a: int, col_b: int, result: wp.array(dtype=bool)):
+            def test_kernel(world_a: int, world_b: int, col_a: int, col_b: int, result: wp.array[bool]):
                 result[0] = test_world_and_group_pair(world_a, world_b, col_a, col_b)
 
             result = wp.zeros(1, dtype=bool)

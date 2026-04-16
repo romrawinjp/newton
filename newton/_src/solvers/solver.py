@@ -1,36 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import warp as wp
 
 from ..geometry import ParticleFlags
-from ..sim import Contacts, Control, Model, ModelBuilder, State
+from ..sim import BodyFlags, Contacts, Control, Model, ModelBuilder, State
 
 
 @wp.kernel
 def integrate_particles(
-    x: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    f: wp.array(dtype=wp.vec3),
-    w: wp.array(dtype=float),
-    particle_flags: wp.array(dtype=wp.int32),
-    gravity: wp.array(dtype=wp.vec3),
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    f: wp.array[wp.vec3],
+    w: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    particle_world: wp.array[wp.int32],
+    gravity: wp.array[wp.vec3],
     dt: float,
     v_max: float,
-    x_new: wp.array(dtype=wp.vec3),
-    v_new: wp.array(dtype=wp.vec3),
+    x_new: wp.array[wp.vec3],
+    v_new: wp.array[wp.vec3],
 ):
     tid = wp.tid()
     x0 = x[tid]
@@ -43,9 +32,11 @@ def integrate_particles(
     f0 = f[tid]
 
     inv_mass = w[tid]
+    world_idx = particle_world[tid]
+    world_g = gravity[wp.max(world_idx, 0)]
 
     # simple semi-implicit Euler. v1 = v0 + a dt, x1 = x0 + v1 dt
-    v1 = v0 + (f0 * inv_mass + gravity[0] * wp.step(-inv_mass)) * dt
+    v1 = v0 + (f0 * inv_mass + world_g * wp.step(-inv_mass)) * dt
     # enforce velocity limit to prevent instability
     v1_mag = wp.length(v1)
     if v1_mag > v_max:
@@ -65,7 +56,7 @@ def integrate_rigid_body(
     inertia: wp.mat33,
     inv_mass: float,
     inv_inertia: wp.mat33,
-    gravity: wp.array(dtype=wp.vec3),
+    gravity: wp.vec3,
     angular_damping: float,
     dt: float,
 ):
@@ -84,7 +75,7 @@ def integrate_rigid_body(
     x_com = x0 + wp.quat_rotate(r0, com)
 
     # linear part
-    v1 = v0 + (f0 * inv_mass + gravity[0] * wp.nonzero(inv_mass)) * dt
+    v1 = v0 + (f0 * inv_mass + gravity * wp.nonzero(inv_mass)) * dt
     x1 = x_com + v1 * dt
 
     # angular part (compute in body frame)
@@ -106,22 +97,33 @@ def integrate_rigid_body(
 # semi-implicit Euler integration
 @wp.kernel
 def integrate_bodies(
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_f: wp.array(dtype=wp.spatial_vector),
-    body_com: wp.array(dtype=wp.vec3),
-    m: wp.array(dtype=float),
-    I: wp.array(dtype=wp.mat33),
-    inv_m: wp.array(dtype=float),
-    inv_I: wp.array(dtype=wp.mat33),
-    gravity: wp.array(dtype=wp.vec3),
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_f: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    m: wp.array[float],
+    I: wp.array[wp.mat33],
+    inv_m: wp.array[float],
+    inv_I: wp.array[wp.mat33],
+    body_flags: wp.array[wp.int32],
+    body_world: wp.array[wp.int32],
+    gravity: wp.array[wp.vec3],
     angular_damping: float,
     dt: float,
     # outputs
-    body_q_new: wp.array(dtype=wp.transform),
-    body_qd_new: wp.array(dtype=wp.spatial_vector),
+    body_q_new: wp.array[wp.transform],
+    body_qd_new: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
+
+    if (body_flags[tid] & BodyFlags.KINEMATIC) != 0:
+        # Kinematic bodies are user-prescribed and pass through unchanged.
+        # NOTE: SemiImplicit does not zero inv_mass/inv_inertia for kinematic
+        # bodies in the contact solver, so contact responses may be weaker
+        # than XPBD or MuJoCo/Featherstone which treat them as infinite-mass.
+        body_q_new[tid] = body_q[tid]
+        body_qd_new[tid] = body_qd[tid]
+        return
 
     # positions
     q = body_q[tid]
@@ -135,6 +137,8 @@ def integrate_bodies(
     inv_inertia = inv_I[tid]  # inverse of 3x3 inertia matrix
 
     com = body_com[tid]
+    world_idx = body_world[tid]
+    world_g = gravity[wp.max(world_idx, 0)]
 
     q_new, qd_new = integrate_rigid_body(
         q,
@@ -144,13 +148,30 @@ def integrate_bodies(
         inertia,
         inv_mass,
         inv_inertia,
-        gravity,
+        world_g,
         angular_damping,
         dt,
     )
 
     body_q_new[tid] = q_new
     body_qd_new[tid] = qd_new
+
+
+@wp.kernel
+def _update_effective_inv_mass_inertia(
+    body_flags: wp.array[wp.int32],
+    model_inv_mass: wp.array[float],
+    model_inv_inertia: wp.array[wp.mat33],
+    eff_inv_mass: wp.array[float],
+    eff_inv_inertia: wp.array[wp.mat33],
+):
+    tid = wp.tid()
+    if (body_flags[tid] & BodyFlags.KINEMATIC) != 0:
+        eff_inv_mass[tid] = 0.0
+        eff_inv_inertia[tid] = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    else:
+        eff_inv_mass[tid] = model_inv_mass[tid]
+        eff_inv_inertia[tid] = model_inv_inertia[tid]
 
 
 class SolverBase:
@@ -166,7 +187,7 @@ class SolverBase:
         self.model = model
 
     @property
-    def device(self) -> wp.context.Device:
+    def device(self) -> wp.Device:
         """
         Get the device used by the solver.
 
@@ -175,6 +196,31 @@ class SolverBase:
         """
         return self.model.device
 
+    def _init_kinematic_state(self):
+        """Allocate and populate effective inverse mass/inertia arrays."""
+        model = self.model
+        self.body_inv_mass_effective = wp.empty_like(model.body_inv_mass)
+        self.body_inv_inertia_effective = wp.empty_like(model.body_inv_inertia)
+        if model.body_count:
+            self._refresh_kinematic_state()
+
+    def _refresh_kinematic_state(self):
+        """Update effective arrays from model, zeroing kinematic bodies."""
+        model = self.model
+        if model.body_count:
+            wp.launch(
+                kernel=_update_effective_inv_mass_inertia,
+                dim=model.body_count,
+                inputs=[
+                    model.body_flags,
+                    model.body_inv_mass,
+                    model.body_inv_inertia,
+                    self.body_inv_mass_effective,
+                    self.body_inv_inertia_effective,
+                ],
+                device=model.device,
+            )
+
     def integrate_bodies(
         self,
         model: Model,
@@ -182,7 +228,7 @@ class SolverBase:
         state_out: State,
         dt: float,
         angular_damping: float = 0.0,
-    ):
+    ) -> None:
         """
         Integrate the rigid bodies of the model.
 
@@ -207,6 +253,8 @@ class SolverBase:
                     model.body_inertia,
                     model.body_inv_mass,
                     model.body_inv_inertia,
+                    model.body_flags,
+                    model.body_world,
                     model.gravity,
                     angular_damping,
                     dt,
@@ -221,7 +269,7 @@ class SolverBase:
         state_in: State,
         state_out: State,
         dt: float,
-    ):
+    ) -> None:
         """
         Integrate the particles of the model.
 
@@ -241,6 +289,7 @@ class SolverBase:
                     state_in.particle_f,
                     model.particle_inv_mass,
                     model.particle_flags,
+                    model.particle_world,
                     model.gravity,
                     dt,
                     model.particle_max_velocity,
@@ -249,26 +298,28 @@ class SolverBase:
                 device=model.device,
             )
 
-    def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float):
+    def step(
+        self, state_in: State, state_out: State, control: Control | None, contacts: Contacts | None, dt: float
+    ) -> None:
         """
         Simulate the model for a given time step using the given control input.
 
         Args:
-            state_in (State): The input state.
-            state_out (State): The output state.
-            control (Control): The control input.
+            state_in: The input state.
+            state_out: The output state.
+            control: The control input.
                 Defaults to `None` which means the control values from the
                 :class:`Model` are used.
-            contacts (Contacts): The contact information.
-            dt (float): The time step (typically in seconds).
+            contacts: The contact information.
+            dt: The time step (typically in seconds).
         """
         raise NotImplementedError()
 
-    def notify_model_changed(self, flags: int):
+    def notify_model_changed(self, flags: int) -> None:
         """Notify the solver that parts of the :class:`~newton.Model` were modified.
 
         The *flags* argument is a bit-mask composed of the
-        ``SolverNotifyFlags`` enums defined in :mod:`newton.solvers`.
+        :class:`~newton.solvers.SolverNotifyFlags` enums defined in :mod:`newton.solvers`.
         Each flag represents a category of model data that may have been
         updated after the solver was created.  Passing the appropriate
         combination of flags enables a solver implementation to refresh its
@@ -293,13 +344,14 @@ class SolverBase:
         """
         pass
 
-    def update_contacts(self, contacts: Contacts) -> None:
+    def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
         """
         Update a Contacts object with forces from the solver state. Where the solver state contains
         other contact data, convert that data to the Contacts format.
 
         Args:
-            contacts (Contacts): The object to update from the solver state.
+            contacts: The object to update from the solver state.
+            state: Optional simulation state, used by some solvers.
         """
         raise NotImplementedError()
 

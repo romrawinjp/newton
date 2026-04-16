@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Used for benchmarking MjWarp.
@@ -32,6 +20,7 @@ wp.config.enable_backward = False
 import newton
 import newton.examples
 import newton.utils
+from newton.sensors import SensorContact
 from newton.utils import EventTracer
 
 ROBOT_CONFIGS = {
@@ -40,15 +29,16 @@ ROBOT_CONFIGS = {
         "integrator": "implicitfast",
         "njmax": 80,
         "nconmax": 25,
-        "ls_parallel": True,
+        "ls_parallel": False,
         "cone": "pyramidal",
+        "sensing_bodies": ["*thigh*", "*shin*", "*foot*", "*arm*"],
     },
     "g1": {
         "solver": "newton",
         "integrator": "implicitfast",
         "njmax": 210,
         "nconmax": 35,
-        "ls_parallel": True,
+        "ls_parallel": False,
         "cone": "pyramidal",
     },
     "h1": {
@@ -56,14 +46,14 @@ ROBOT_CONFIGS = {
         "integrator": "implicitfast",
         "njmax": 65,
         "nconmax": 15,
-        "ls_parallel": True,
+        "ls_parallel": False,
         "cone": "pyramidal",
     },
-    "cartpole": {  # TODO: use the Lab version of cartpole and revert param value
+    "cartpole": {
         "solver": "newton",
         "integrator": "implicitfast",
-        "njmax": 24,  # 5
-        "nconmax": 6,  # 5
+        "njmax": 5,
+        "nconmax": 0,
         "ls_parallel": False,
         "cone": "pyramidal",
     },
@@ -72,7 +62,7 @@ ROBOT_CONFIGS = {
         "integrator": "implicitfast",
         "njmax": 38,
         "nconmax": 15,
-        "ls_parallel": True,
+        "ls_parallel": False,
         "cone": "pyramidal",
     },
     "quadruped": {
@@ -80,7 +70,7 @@ ROBOT_CONFIGS = {
         "integrator": "implicitfast",
         "njmax": 75,
         "nconmax": 50,
-        "ls_parallel": True,
+        "ls_parallel": False,
         "cone": "pyramidal",
     },
     "allegro": {
@@ -88,16 +78,16 @@ ROBOT_CONFIGS = {
         "integrator": "implicitfast",
         "njmax": 60,
         "nconmax": 40,
-        "ls_parallel": True,
+        "ls_parallel": False,
         "cone": "elliptic",
     },
     "kitchen": {
-        "setup_builder": lambda x: _setup_kitchen(x),
+        "setup_builder": lambda x: _setup_kitchen(x),  # noqa: PLW0108  # lambda defers lookup
         "njmax": 3800,
         "nconmax": 900,
     },
     "tabletop": {
-        "setup_builder": lambda x: _setup_tabletop(x),
+        "setup_builder": lambda x: _setup_tabletop(x),  # noqa: PLW0108  # lambda defers lookup
         "njmax": 100,
         "nconmax": 20,
     },
@@ -110,6 +100,7 @@ def _setup_humanoid(articulation_builder):
         ignore_names=["floor", "ground"],
         up_axis="Z",
         parse_sites=False,  # AD: remove once asset is fixed
+        enable_self_collisions=False,  # Keep False for consistent benchmark performance
     )
 
     # Setting root pose
@@ -183,19 +174,22 @@ def _setup_h1(articulation_builder):
 def _setup_cartpole(articulation_builder):
     articulation_builder.default_shape_cfg.density = 100.0
     articulation_builder.default_joint_cfg.armature = 0.1
-    articulation_builder.default_body_armature = 0.1
 
     articulation_builder.add_usd(
-        newton.examples.get_asset("cartpole.usda"),
+        newton.examples.get_asset("cartpole_single_pendulum.usda"),
         enable_self_collisions=False,
         collapse_fixed_joints=True,
     )
-    # set initial joint positions
-    articulation_builder.joint_q[-3:] = [0.0, 0.3, 0.0]
+    armature_inertia = wp.mat33(np.eye(3, dtype=np.float32)) * 0.1
+    for i in range(articulation_builder.body_count):
+        articulation_builder.body_inertia[i] = articulation_builder.body_inertia[i] + armature_inertia
+    # set initial joint positions (cartpole has 2 joints: prismatic slider + revolute pole)
+    # joint_q[0] = slider position, joint_q[1] = pole angle
+    articulation_builder.joint_q[0] = 0.0  # slider at origin
+    articulation_builder.joint_q[1] = 0.3  # pole tilted
 
     # Setting root pose
     root_dofs = 1
-    articulation_builder.joint_q[:3] = [0.0, 0.3, 0.0]
 
     return root_dofs
 
@@ -214,7 +208,6 @@ def _setup_ant(articulation_builder):
 
 
 def _setup_quadruped(articulation_builder):
-    articulation_builder.default_body_armature = 0.01
     articulation_builder.default_joint_cfg.armature = 0.01
     articulation_builder.default_shape_cfg.ke = 1.0e4
     articulation_builder.default_shape_cfg.kd = 1.0e2
@@ -226,6 +219,9 @@ def _setup_quadruped(articulation_builder):
         floating=True,
         enable_self_collisions=False,
     )
+    armature_inertia = wp.mat33(np.eye(3, dtype=np.float32)) * 0.01
+    for i in range(articulation_builder.body_count):
+        articulation_builder.body_inertia[i] = articulation_builder.body_inertia[i] + armature_inertia
     root_dofs = 7
 
     return root_dofs
@@ -257,6 +253,7 @@ def _setup_kitchen(articulation_builder):
     articulation_builder.add_mjcf(
         asset_file,
         collapse_fixed_joints=True,
+        enable_self_collisions=False,  # Keep False for consistent benchmark performance
     )
 
     # Change pose of the robot to minimize overlap
@@ -267,7 +264,6 @@ def _setup_tabletop(articulation_builder):
     articulation_builder.add_mjcf(
         newton.examples.get_asset("tabletop.xml"),
         collapse_fixed_joints=True,
-        enable_self_collisions=True,
     )
 
 
@@ -277,7 +273,7 @@ class Example:
         robot="humanoid",
         environment="None",
         stage_path=None,
-        num_worlds=1,
+        world_count=1,
         use_cuda_graph=True,
         use_mujoco_cpu=False,
         randomize=False,
@@ -300,7 +296,7 @@ class Example:
         self.sim_substeps = 10
         self.contacts = None
         self.sim_dt = self.frame_dt / self.sim_substeps
-        self.num_worlds = num_worlds
+        self.world_count = world_count
         self.use_cuda_graph = use_cuda_graph
         self.use_mujoco_cpu = use_mujoco_cpu
         self.actuation = actuation
@@ -313,7 +309,7 @@ class Example:
             stage_path = "example_" + robot + ".usd"
 
         if builder is None:
-            builder = Example.create_model_builder(robot, num_worlds, environment, randomize, self.seed)
+            builder = Example.create_model_builder(robot, world_count, environment, randomize, self.seed)
 
         # finalize model
         self.model = builder.finalize()
@@ -344,6 +340,17 @@ class Example:
         self.state_0, self.state_1 = self.model.state(), self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
 
+        self.sensor_contact = None
+        sensing_bodies = ROBOT_CONFIGS.get(robot, {}).get("sensing_bodies", None)
+        if sensing_bodies is not None:
+            self.sensor_contact = SensorContact(self.model, sensing_obj_bodies=sensing_bodies, counterpart_bodies="*")
+            self.contacts = newton.Contacts(
+                self.solver.get_max_contact_count(),
+                0,
+                device=self.model.device,
+                requested_attributes=self.model.get_requested_contact_attributes(),
+            )
+
         self.graph = None
         if self.use_cuda_graph:
             # simulate() allocates memory via a clone, so we can't use graph capture if the device does not support mempools
@@ -360,6 +367,9 @@ class Example:
             self.state_0.clear_forces()
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
             self.state_0, self.state_1 = self.state_1, self.state_0
+        if self.sensor_contact is not None:
+            self.solver.update_contacts(self.contacts, self.state_0)
+            self.sensor_contact.update(self.state_0, self.contacts)
 
     def step(self):
         if self.actuation == "random":
@@ -387,7 +397,7 @@ class Example:
         self.renderer.end_frame()
 
     @staticmethod
-    def create_model_builder(robot, num_worlds, environment="None", randomize=False, seed=123) -> newton.ModelBuilder:
+    def create_model_builder(robot, world_count, environment="None", randomize=False, seed=123) -> newton.ModelBuilder:
         rng = np.random.default_rng(seed)
 
         articulation_builder = newton.ModelBuilder()
@@ -416,17 +426,19 @@ class Example:
             custom_setup_fn(articulation_builder)
 
         builder = newton.ModelBuilder()
-        builder.replicate(articulation_builder, num_worlds)
+        builder.replicate(articulation_builder, world_count)
         if randomize:
             njoint = len(articulation_builder.joint_q)
-            for i in range(num_worlds):
+            for i in range(world_count):
                 istart = i * njoint
                 builder.joint_q[istart + root_dofs : istart + njoint] = rng.uniform(
                     -1.0, 1.0, size=(njoint - root_dofs)
                 ).tolist()
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
-        builder.add_ground_plane()
+        if robot != "cartpole":
+            # Disable all collisions for the cartpole benchmark
+            builder.add_ground_plane()
         return builder
 
     @staticmethod
@@ -480,7 +492,8 @@ def print_trace(trace, indent, steps):
         print_trace(sub_trace, indent + 1, steps)
     if indent == 0:
         step_time = trace["step"][0]
-        mujoco_warp_step_time = trace["step"][1]["mujoco_warp_step"][0]
+        step_trace = trace["step"][1]
+        mujoco_warp_step_time = step_trace["_mujoco_warp_step"][0]
         overhead = 100.0 * (step_time - mujoco_warp_step_time) / step_time
         print("---------------------------------------------")
         print(f"Newton overhead:\t{overhead:.2f} %")
@@ -504,7 +517,7 @@ if __name__ == "__main__":
         help="Path to the output USD file.",
     )
     parser.add_argument("--num-frames", type=int, default=12000, help="Total number of frames.")
-    parser.add_argument("--num-worlds", type=int, default=1, help="Total number of simulated worlds.")
+    parser.add_argument("--world-count", type=int, default=1, help="Total number of simulated worlds.")
     parser.add_argument("--use-cuda-graph", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument(
         "--use-mujoco-cpu",
@@ -555,7 +568,7 @@ if __name__ == "__main__":
                 robot=args.robot,
                 environment=args.env,
                 stage_path=args.stage_path,
-                num_worlds=args.num_worlds,
+                world_count=args.world_count,
                 use_cuda_graph=args.use_cuda_graph,
                 use_mujoco_cpu=args.use_mujoco_cpu,
                 randomize=args.random_init,
@@ -577,7 +590,7 @@ if __name__ == "__main__":
             title = " Simulation Configuration "
             print(f"\n{title.center(TOTAL_WIDTH, '=')}")
             print(f"{'Simulation Steps':<{LABEL_WIDTH}}: {args.num_frames * example.sim_substeps}")
-            print(f"{'World Count':<{LABEL_WIDTH}}: {args.num_worlds}")
+            print(f"{'World Count':<{LABEL_WIDTH}}: {args.world_count}")
             print(f"{'Robot Type':<{LABEL_WIDTH}}: {args.robot}")
             print(f"{'Timestep (dt)':<{LABEL_WIDTH}}: {example.sim_dt:.6f}s")
             print(f"{'Randomize Initial Pose':<{LABEL_WIDTH}}: {args.random_init!s}")
@@ -602,8 +615,8 @@ if __name__ == "__main__":
             # Get actual max constraints and contacts from MuJoCo Warp data
             actual_njmax = example.solver.mjw_data.njmax
             actual_nconmax = (
-                example.solver.mjw_data.naconmax // args.num_worlds
-                if args.num_worlds > 0
+                example.solver.mjw_data.naconmax // args.world_count
+                if args.world_count > 0
                 else example.solver.mjw_data.naconmax
             )
             print(f"{'Solver':<{LABEL_WIDTH}}: {actual_solver}")

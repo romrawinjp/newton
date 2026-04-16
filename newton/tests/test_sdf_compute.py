@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-"""Test compute_sdf function for SDF generation.
+"""Test compute_sdf_from_shape function for SDF generation.
 
 This test suite validates:
 1. SDF values inside the extent are smaller than the background value
@@ -31,9 +19,17 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.geometry.sdf_contact import sample_sdf_extrapolated, sample_sdf_grad_extrapolated
-from newton._src.geometry.types import Mesh
-from newton.geometry import SDFData, compute_sdf
+from newton import GeoType, Mesh
+from newton._src.geometry.sdf_utils import (
+    SDF,
+    SDFData,
+    compute_isomesh,
+    compute_offset_mesh,
+    compute_offset_mesh_analytical,
+    compute_sdf_from_shape,
+    sample_sdf_extrapolated,
+    sample_sdf_grad_extrapolated,
+)
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices
 
 # Skip all tests in this module if CUDA is not available
@@ -107,12 +103,98 @@ def create_box_mesh(half_extents: tuple[float, float, float]) -> Mesh:
     return Mesh(vertices, indices)
 
 
+def create_sphere_mesh(radius: float, subdivisions: int = 2) -> Mesh:
+    """Create a sphere mesh by subdividing an icosahedron."""
+    # Golden ratio
+    phi = (1.0 + np.sqrt(5.0)) / 2.0
+
+    # Icosahedron vertices (normalized and scaled by radius)
+    verts_list = [
+        [-1, phi, 0],
+        [1, phi, 0],
+        [-1, -phi, 0],
+        [1, -phi, 0],
+        [0, -1, phi],
+        [0, 1, phi],
+        [0, -1, -phi],
+        [0, 1, -phi],
+        [phi, 0, -1],
+        [phi, 0, 1],
+        [-phi, 0, -1],
+        [-phi, 0, 1],
+    ]
+    norm_factor = np.linalg.norm(verts_list[0])
+    verts_list = [
+        [v[0] / norm_factor * radius, v[1] / norm_factor * radius, v[2] / norm_factor * radius] for v in verts_list
+    ]
+
+    # Icosahedron faces (CCW winding for outward normals)
+    faces = [
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ]
+
+    # Subdivide
+    for _ in range(subdivisions):
+        new_faces = []
+        edge_midpoints = {}
+
+        def get_midpoint(i0, i1, _edge_midpoints=edge_midpoints):
+            key = (min(i0, i1), max(i0, i1))
+            if key not in _edge_midpoints:
+                v0, v1 = verts_list[i0], verts_list[i1]
+                mid = [(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2]
+                length = np.sqrt(mid[0] ** 2 + mid[1] ** 2 + mid[2] ** 2)
+                mid = [mid[0] / length * radius, mid[1] / length * radius, mid[2] / length * radius]
+                _edge_midpoints[key] = len(verts_list)
+                verts_list.append(mid)
+            return _edge_midpoints[key]
+
+        for f in faces:
+            a = get_midpoint(f[0], f[1])
+            b = get_midpoint(f[1], f[2])
+            c = get_midpoint(f[2], f[0])
+            new_faces.extend([[f[0], a, c], [f[1], b, a], [f[2], c, b], [a, b, c]])
+        faces = new_faces
+
+    verts = np.array(verts_list, dtype=np.float32)
+    indices = np.array(faces, dtype=np.int32).flatten()
+    return Mesh(verts, indices)
+
+
+def invert_mesh_winding(mesh: Mesh) -> Mesh:
+    """Create a mesh with inverted winding by swapping triangle indices."""
+    indices = mesh.indices.copy()
+    # Swap second and third vertex of each triangle to flip winding
+    for i in range(0, len(indices), 3):
+        indices[i + 1], indices[i + 2] = indices[i + 2], indices[i + 1]
+    return Mesh(mesh.vertices.copy(), indices)
+
+
 # Warp kernel for sampling SDF values
 @wp.kernel
 def sample_sdf_kernel(
     volume_id: wp.uint64,
-    points: wp.array(dtype=wp.vec3),
-    values: wp.array(dtype=wp.float32),
+    points: wp.array[wp.vec3],
+    values: wp.array[wp.float32],
 ):
     tid = wp.tid()
     point = points[tid]
@@ -124,9 +206,9 @@ def sample_sdf_kernel(
 @wp.kernel
 def sample_sdf_gradient_kernel(
     volume_id: wp.uint64,
-    points: wp.array(dtype=wp.vec3),
-    values: wp.array(dtype=wp.float32),
-    gradients: wp.array(dtype=wp.vec3),
+    points: wp.array[wp.vec3],
+    values: wp.array[wp.float32],
+    gradients: wp.array[wp.vec3],
 ):
     tid = wp.tid()
     point = points[tid]
@@ -147,7 +229,6 @@ def sample_sdf_at_points(volume, points_np: np.ndarray) -> np.ndarray:
         dim=n_points,
         inputs=[volume.id, points, values],
     )
-    wp.synchronize()
 
     return values.numpy()
 
@@ -164,30 +245,27 @@ def sample_sdf_with_gradient(volume, points_np: np.ndarray) -> tuple[np.ndarray,
         dim=n_points,
         inputs=[volume.id, points, values, gradients],
     )
-    wp.synchronize()
 
     return values.numpy(), gradients.numpy()
 
 
 @unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestComputeSDF(unittest.TestCase):
-    """Test the compute_sdf function."""
+    """Test the compute_sdf_from_shape function."""
 
     @classmethod
     def setUpClass(cls):
         """Set up test fixtures once for all tests."""
         wp.init()
-
-    def setUp(self):
-        """Set up test fixtures."""
-        self.half_extents = (0.5, 0.5, 0.5)
-        self.mesh = create_box_mesh(self.half_extents)
+        cls.half_extents = (0.5, 0.5, 0.5)
+        cls.mesh = create_box_mesh(cls.half_extents)
 
     def test_sdf_returns_valid_data(self):
-        """Test that compute_sdf returns valid data."""
-        sdf_data, sparse_volume, coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        """Test that compute_sdf_from_shape returns valid data."""
+        sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         self.assertIsNotNone(sparse_volume)
@@ -197,9 +275,10 @@ class TestComputeSDF(unittest.TestCase):
 
     def test_sdf_extents_are_valid(self):
         """Test that SDF extents match the mesh bounds."""
-        sdf_data, _, _ = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        sdf_data, _, _, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
             margin=0.05,
         )
 
@@ -216,9 +295,10 @@ class TestComputeSDF(unittest.TestCase):
         (within narrow_band_distance) will have valid values. Points far from the
         surface will return the background value.
         """
-        sdf_data, sparse_volume, _ = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
             narrow_band_distance=(-0.1, 0.1),
         )
 
@@ -246,9 +326,10 @@ class TestComputeSDF(unittest.TestCase):
 
     def test_coarse_sdf_values_inside_extent(self):
         """Test that coarse SDF values inside the extent are smaller than background."""
-        sdf_data, _, coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        sdf_data, _, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         # Sample points inside the SDF extent
@@ -282,9 +363,10 @@ class TestComputeSDF(unittest.TestCase):
         Points at or near this boundary should still have valid SDF values.
         """
         margin = 0.05
-        sdf_data, _, coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        sdf_data, _, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
             margin=margin,
         )
 
@@ -351,9 +433,10 @@ class TestComputeSDF(unittest.TestCase):
         within this narrow band, so we should get valid values there.
         """
         margin = 0.05
-        sdf_data, sparse_volume, _ = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
             margin=margin,
         )
 
@@ -409,9 +492,10 @@ class TestComputeSDF(unittest.TestCase):
         For the sparse SDF, we test a point just inside the surface (within the narrow band).
         For the coarse SDF, we can test the center since it covers the entire volume.
         """
-        _sdf_data, sparse_volume, coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        _sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         # For sparse SDF: test point just inside a face (within narrow band)
@@ -428,9 +512,10 @@ class TestComputeSDF(unittest.TestCase):
 
     def test_sdf_positive_outside_mesh(self):
         """Test that SDF values are positive outside the mesh."""
-        _sdf_data, sparse_volume, coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        _sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         # Point well outside the box
@@ -446,9 +531,10 @@ class TestComputeSDF(unittest.TestCase):
 
     def test_sdf_gradient_points_outward(self):
         """Test that SDF gradient points away from the surface (outward)."""
-        _sdf_data, sparse_volume, _ = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        _sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         # Test gradient at a point slightly inside the +X face
@@ -474,9 +560,10 @@ class TestComputeSDF(unittest.TestCase):
         We test at a point near the surface (within the narrow band) where both
         SDFs should have valid values.
         """
-        _sdf_data, sparse_volume, coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        _sdf_data, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         # Sample at a point near the surface (within narrow band)
@@ -499,14 +586,16 @@ class TestComputeSDF(unittest.TestCase):
         """
         thickness = 0.1
 
-        _, sparse_no_thickness, _ = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        _, sparse_no_thickness, _, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
-        _, sparse_with_thickness, _ = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=thickness,
+        _, sparse_with_thickness, _, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=thickness,
         )
 
         # Sample near the surface (within narrow band)
@@ -523,6 +612,79 @@ class TestComputeSDF(unittest.TestCase):
             msg=f"Thickness should offset SDF by -{thickness}",
         )
 
+    def test_inverted_winding_sphere(self):
+        """Test SDF computation for a sphere mesh with inverted winding.
+
+        Verifies that:
+        1. The inverted winding is detected (winding threshold becomes -0.5)
+        2. Points inside the sphere still have negative SDF values
+        3. Points outside the sphere still have positive SDF values
+        """
+        radius = 0.5
+        sphere = create_sphere_mesh(radius, subdivisions=2)
+        inverted_sphere = invert_mesh_winding(sphere)
+
+        # Compute SDF at low resolution for speed, with wider narrow band
+        _, sparse_volume, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=inverted_sphere,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
+            max_resolution=32,
+            narrow_band_distance=(-0.2, 0.2),  # Wider band for testing
+        )
+
+        self.assertIsNotNone(sparse_volume)
+        self.assertIsNotNone(coarse_volume)
+
+        # Test points inside the sphere (should be negative)
+        inside_points = np.array(
+            [
+                [0.0, 0.0, 0.0],  # Center
+                [0.1, 0.0, 0.0],  # Slightly off center
+                [0.0, 0.2, 0.0],  # Another inside point
+                [0.1, 0.1, 0.1],  # Inside diagonal
+            ],
+            dtype=np.float32,
+        )
+
+        inside_values = sample_sdf_at_points(coarse_volume, inside_points)
+        for i, (point, value) in enumerate(zip(inside_points, inside_values, strict=False)):
+            self.assertLess(value, 0.0, f"Point {i} at {point} should be inside (negative), got {value}")
+
+        # Test points near but inside sphere surface (should be negative)
+        # The SDF extent is ~1.1, so stay well within bounds
+        near_inside_points = np.array(
+            [
+                [radius - 0.05, 0.0, 0.0],  # Just inside +X
+                [0.0, radius - 0.05, 0.0],  # Just inside +Y
+                [0.0, 0.0, radius - 0.05],  # Just inside +Z
+            ],
+            dtype=np.float32,
+        )
+
+        near_inside_values = sample_sdf_at_points(coarse_volume, near_inside_points)
+        for i, (point, value) in enumerate(zip(near_inside_points, near_inside_values, strict=False)):
+            self.assertLess(value, 0.0, f"Point {i} at {point} should be inside (negative), got {value}")
+
+        # Test points just outside sphere surface (should be positive)
+        # Use small offset (0.02) to stay well within the narrow band and volume extent
+        outside_offset = 0.02
+        outside_points = np.array(
+            [
+                [radius + outside_offset, 0.0, 0.0],  # Just outside +X
+                [0.0, radius + outside_offset, 0.0],  # Just outside +Y
+                [0.0, 0.0, radius + outside_offset],  # Just outside +Z
+                [-(radius + outside_offset), 0.0, 0.0],  # Just outside -X
+                [0.0, -(radius + outside_offset), 0.0],  # Just outside -Y
+                [0.0, 0.0, -(radius + outside_offset)],  # Just outside -Z
+            ],
+            dtype=np.float32,
+        )
+
+        outside_values = sample_sdf_at_points(coarse_volume, outside_points)
+        for i, (point, value) in enumerate(zip(outside_points, outside_values, strict=False)):
+            self.assertGreater(value, 0.0, f"Point {i} at {point} should be outside (positive), got {value}")
+
 
 @unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
 class TestComputeSDFGridSampling(unittest.TestCase):
@@ -532,11 +694,8 @@ class TestComputeSDFGridSampling(unittest.TestCase):
     def setUpClass(cls):
         """Set up test fixtures once for all tests."""
         wp.init()
-
-    def setUp(self):
-        """Set up test fixtures."""
-        self.half_extents = (0.5, 0.5, 0.5)
-        self.mesh = create_box_mesh(self.half_extents)
+        cls.half_extents = (0.5, 0.5, 0.5)
+        cls.mesh = create_box_mesh(cls.half_extents)
 
     def test_grid_sampling_sparse_sdf_near_surface(self):
         """Sample sparse SDF on a grid near the surface and verify values are valid.
@@ -544,9 +703,10 @@ class TestComputeSDFGridSampling(unittest.TestCase):
         Since the sparse SDF is a narrow-band SDF, we sample points near the surface
         (on a shell around the box) where the SDF should have valid values.
         """
-        sdf_data, sparse_volume, _ = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        sdf_data, sparse_volume, _, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         # Sample points on a grid near the +X face of the box (within narrow band)
@@ -572,9 +732,10 @@ class TestComputeSDFGridSampling(unittest.TestCase):
 
     def test_grid_sampling_coarse_sdf(self):
         """Sample coarse SDF on a grid and verify all values are less than background."""
-        sdf_data, _, coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        sdf_data, _, coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=self.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
         )
 
         # Create a grid of test points inside the extent
@@ -607,8 +768,8 @@ class TestComputeSDFGridSampling(unittest.TestCase):
 @wp.kernel
 def sample_sdf_extrapolated_kernel(
     sdf_data: SDFData,
-    points: wp.array(dtype=wp.vec3),
-    values: wp.array(dtype=wp.float32),
+    points: wp.array[wp.vec3],
+    values: wp.array[wp.float32],
 ):
     """Kernel to test sample_sdf_extrapolated function."""
     tid = wp.tid()
@@ -618,9 +779,9 @@ def sample_sdf_extrapolated_kernel(
 @wp.kernel
 def sample_sdf_grad_extrapolated_kernel(
     sdf_data: SDFData,
-    points: wp.array(dtype=wp.vec3),
-    values: wp.array(dtype=wp.float32),
-    gradients: wp.array(dtype=wp.vec3),
+    points: wp.array[wp.vec3],
+    values: wp.array[wp.float32],
+    gradients: wp.array[wp.vec3],
 ):
     """Kernel to test sample_sdf_grad_extrapolated function."""
     tid = wp.tid()
@@ -640,7 +801,6 @@ def sample_extrapolated_at_points(sdf_data: SDFData, points_np: np.ndarray) -> n
         dim=n_points,
         inputs=[sdf_data, points, values],
     )
-    wp.synchronize()
 
     return values.numpy()
 
@@ -657,7 +817,6 @@ def sample_extrapolated_with_gradient(sdf_data: SDFData, points_np: np.ndarray) 
         dim=n_points,
         inputs=[sdf_data, points, values, gradients],
     )
-    wp.synchronize()
 
     return values.numpy(), gradients.numpy()
 
@@ -670,15 +829,13 @@ class TestSDFExtrapolation(unittest.TestCase):
     def setUpClass(cls):
         """Set up test fixtures once for all tests."""
         wp.init()
-
-    def setUp(self):
-        """Set up test fixtures."""
-        self.half_extents = (0.5, 0.5, 0.5)
-        self.mesh = create_box_mesh(self.half_extents)
+        cls.half_extents = (0.5, 0.5, 0.5)
+        cls.mesh = create_box_mesh(cls.half_extents)
         # Create SDF with known parameters
-        self.sdf_data, self.sparse_volume, self.coarse_volume = compute_sdf(
-            mesh_src=self.mesh,
-            shape_thickness=0.0,
+        cls.sdf_data, cls.sparse_volume, cls.coarse_volume, _ = compute_sdf_from_shape(
+            shape_geo=cls.mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
             narrow_band_distance=(-0.1, 0.1),
             margin=0.05,
         )
@@ -753,9 +910,9 @@ class TestSDFExtrapolation(unittest.TestCase):
         # Get boundary points (clamped to extent)
         boundary_points = np.array(
             [
-                center + np.array([half_ext[0], 0.0, 0.0]),  # +X boundary
-                center + np.array([0.0, half_ext[1], 0.0]),  # +Y boundary
-                center + np.array([0.0, 0.0, half_ext[2]]),  # +Z boundary
+                center + np.array([half_ext[0] - 1e-6, 0.0, 0.0]),  # +X boundary
+                center + np.array([0.0, half_ext[1] - 1e-6, 0.0]),  # +Y boundary
+                center + np.array([0.0, 0.0, half_ext[2] - 1e-6]),  # +Z boundary
             ],
             dtype=np.float32,
         )
@@ -911,34 +1068,33 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
     def setUpClass(cls):
         """Set up test fixtures once for all tests."""
         wp.init()
+        cls.half_extents = (0.5, 0.5, 0.5)
+        cls.mesh = create_box_mesh(cls.half_extents)
 
-    def setUp(self):
-        """Set up test fixtures."""
-        self.half_extents = (0.5, 0.5, 0.5)
-        self.mesh = create_box_mesh(self.half_extents)
-
-    def test_sdf_max_resolution_raises_on_cpu(self):
-        """Test that sdf_max_resolution != None raises ValueError on CPU."""
+    def test_mesh_cfg_sdf_conflict_raises(self):
+        """Mesh shapes should reject cfg.sdf_* and require mesh.build_sdf()."""
         builder = newton.ModelBuilder()
         cfg = newton.ModelBuilder.ShapeConfig()
-        cfg.sdf_max_resolution = 64  # Request SDF generation
-
-        # Add a mesh shape to trigger SDF computation
+        cfg.sdf_max_resolution = 64
         builder.add_body()
-        builder.add_shape_mesh(body=-1, mesh=self.mesh, cfg=cfg)
-
-        # Should raise ValueError when finalizing on CPU
         with self.assertRaises(ValueError) as context:
-            builder.finalize(device="cpu")
+            builder.add_shape_mesh(body=-1, mesh=self.mesh, cfg=cfg)
+        self.assertIn("mesh.build_sdf", str(context.exception))
 
-        self.assertIn("CUDA", str(context.exception))
-        self.assertIn("sdf_max_resolution", str(context.exception))
+    def test_mesh_cfg_sdf_narrow_band_conflict_raises(self):
+        """Mesh shapes should reject cfg.sdf_narrow_band_range overrides."""
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig()
+        cfg.sdf_narrow_band_range = (-0.2, 0.2)
+        builder.add_body()
+        with self.assertRaises(ValueError) as context:
+            builder.add_shape_mesh(body=-1, mesh=self.mesh, cfg=cfg)
+        self.assertIn("mesh.build_sdf", str(context.exception))
 
     def test_sdf_disabled_works_on_cpu(self):
-        """Test that sdf_max_resolution=None (default) works on CPU."""
+        """Mesh without mesh.sdf should still finalize on CPU."""
         builder = newton.ModelBuilder()
         cfg = newton.ModelBuilder.ShapeConfig()
-        cfg.sdf_max_resolution = None  # No SDF generation (default)
 
         # Add a mesh shape
         builder.add_body()
@@ -947,29 +1103,528 @@ class TestMeshSDFCollisionFlag(unittest.TestCase):
         # Should NOT raise when finalizing on CPU
         model = builder.finalize(device="cpu")
 
-        # SDF data array should still exist (one empty entry per shape)
-        self.assertEqual(model.shape_sdf_data.shape[0], 1)
-        # But the SDF pointer should be zero (no SDF generated)
-        self.assertEqual(model.shape_sdf_data.numpy()[0]["sparse_sdf_ptr"], 0)
+        # No compact SDF entry should exist for this shape
+        self.assertEqual(int(model.shape_sdf_index.numpy()[0]), -1)
+        self.assertEqual(model.texture_sdf_data.shape[0], 0)
 
     @unittest.skipUnless(_cuda_available, "Requires CUDA device")
-    def test_sdf_enabled_works_on_gpu(self):
-        """Test that sdf_max_resolution != None works on GPU."""
+    def test_mesh_build_sdf_works_on_gpu(self):
+        """Mesh SDF built via mesh.build_sdf() should be used by builder."""
         builder = newton.ModelBuilder()
         cfg = newton.ModelBuilder.ShapeConfig()
-        cfg.sdf_max_resolution = 64  # Request SDF generation
+        mesh = create_box_mesh(self.half_extents)
+        mesh.build_sdf(max_resolution=64)
 
         # Add a mesh shape
         builder.add_body()
-        builder.add_shape_mesh(body=-1, mesh=self.mesh, cfg=cfg)
+        builder.add_shape_mesh(body=-1, mesh=mesh, cfg=cfg)
 
         # Should work on GPU
         model = builder.finalize(device="cuda:0")
 
-        # SDF data should be populated
-        self.assertGreater(model.shape_sdf_data.shape[0], 0)
-        # SDF pointer should be non-zero (SDF was generated)
-        self.assertNotEqual(model.shape_sdf_data.numpy()[0]["sparse_sdf_ptr"], 0)
+        # Texture SDF data should be populated in compact table
+        sdf_idx = int(model.shape_sdf_index.numpy()[0])
+        self.assertGreaterEqual(sdf_idx, 0)
+        self.assertGreater(model.texture_sdf_data.shape[0], sdf_idx)
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_mesh_build_sdf_guard_and_clear(self):
+        """build_sdf() should guard overwrite until clear_sdf() is called."""
+        mesh = create_box_mesh((0.2, 0.2, 0.2))
+        mesh.build_sdf(max_resolution=32)
+        with self.assertRaises(RuntimeError):
+            mesh.build_sdf(max_resolution=32)
+        mesh.clear_sdf()
+        mesh.build_sdf(max_resolution=32)
+        self.assertIsNotNone(mesh.sdf)
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_sdf_create_from_data_roundtrip(self):
+        """Round-trip SDF reconstruction from generated volumes."""
+        mesh = create_box_mesh((0.3, 0.2, 0.1))
+        mesh.build_sdf(max_resolution=32)
+        sdf = mesh.sdf
+        assert sdf is not None
+
+        rebuilt = newton.SDF.create_from_data(
+            sparse_volume=sdf.sparse_volume,
+            coarse_volume=sdf.coarse_volume,
+            block_coords=sdf.block_coords,
+            center=tuple(sdf.data.center),
+            half_extents=tuple(sdf.data.half_extents),
+            background_value=float(sdf.data.background_value),
+            scale_baked=bool(sdf.data.scale_baked),
+        )
+        self.assertEqual(int(rebuilt.data.sparse_sdf_ptr), int(sdf.data.sparse_sdf_ptr))
+        self.assertEqual(int(rebuilt.data.coarse_sdf_ptr), int(sdf.data.coarse_sdf_ptr))
+        np.testing.assert_allclose(np.array(rebuilt.data.sparse_voxel_size), np.array(sdf.data.sparse_voxel_size))
+        np.testing.assert_allclose(np.array(rebuilt.data.coarse_voxel_size), np.array(sdf.data.coarse_voxel_size))
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_sdf_static_create_methods(self):
+        """SDF static creation methods should construct valid SDF handles."""
+        mesh = create_box_mesh((0.3, 0.2, 0.1))
+
+        sdf_from_mesh = newton.SDF.create_from_mesh(mesh, max_resolution=32)
+        self.assertNotEqual(int(sdf_from_mesh.data.sparse_sdf_ptr), 0)
+
+        sdf_from_points = newton.SDF.create_from_points(mesh.vertices, mesh.indices, max_resolution=32)
+        self.assertNotEqual(int(sdf_from_points.data.sparse_sdf_ptr), 0)
+
+        rebuilt = newton.SDF.create_from_data(
+            sparse_volume=sdf_from_mesh.sparse_volume,
+            coarse_volume=sdf_from_mesh.coarse_volume,
+            block_coords=sdf_from_mesh.block_coords,
+            center=tuple(sdf_from_mesh.data.center),
+            half_extents=tuple(sdf_from_mesh.data.half_extents),
+            background_value=float(sdf_from_mesh.data.background_value),
+            scale_baked=bool(sdf_from_mesh.data.scale_baked),
+        )
+        self.assertEqual(int(rebuilt.data.sparse_sdf_ptr), int(sdf_from_mesh.data.sparse_sdf_ptr))
+
+    def test_standalone_sdf_shape_api_removed(self):
+        """GeoType.SDF and add_shape_sdf should not exist."""
+        self.assertFalse(hasattr(newton.GeoType, "SDF"))
+        self.assertFalse(hasattr(newton.ModelBuilder, "add_shape_sdf"))
+
+
+class TestSDFPublicApi(unittest.TestCase):
+    """Test public API shape for SDF creators."""
+
+    def test_top_level_sdf_exported(self):
+        """Top-level package should expose SDF as newton.SDF."""
+        self.assertTrue(hasattr(newton, "SDF"))
+        self.assertFalse(hasattr(newton.geometry, "SDF"))
+
+    def test_module_level_sdf_creators_removed(self):
+        """Module-level SDF creators should not be exposed in public API."""
+        self.assertFalse(hasattr(newton.geometry, "create_sdf_from_mesh"))
+        self.assertFalse(hasattr(newton.geometry, "create_sdf_from_data"))
+
+    @unittest.skipUnless(_cuda_available, "Requires CUDA device")
+    def test_hydroelastic_primitive_generates_sdf_on_gpu(self):
+        """Hydroelastic primitives should generate per-shape SDF data."""
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig()
+        cfg.sdf_max_resolution = 32
+        cfg.is_hydroelastic = True
+
+        body = builder.add_body()
+        builder.add_shape_box(body=body, hx=0.5, hy=0.4, hz=0.3, cfg=cfg)
+
+        model = builder.finalize(device="cuda:0")
+        sdf_idx = int(model.shape_sdf_index.numpy()[0])
+        self.assertGreaterEqual(sdf_idx, 0)
+        self.assertGreater(model.texture_sdf_data.shape[0], sdf_idx)
+
+
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
+class TestComputeOffsetMesh(unittest.TestCase):
+    """Test compute_offset_mesh for various shapes and offset magnitudes.
+
+    Validates that the offset isosurface is geometrically correct even when
+    the offset pushes the surface well beyond the original shape AABB.
+    """
+
+    device = "cuda:0"
+
+    @staticmethod
+    def _analytical_sdf(v, shape_type, shape_scale):
+        """Evaluate analytical SDF for a primitive at point v using NumPy."""
+        if shape_type == GeoType.SPHERE:
+            return np.linalg.norm(v) - shape_scale[0]
+        if shape_type == GeoType.BOX:
+            q = np.abs(v) - np.array(shape_scale[:3])
+            return float(np.linalg.norm(np.maximum(q, 0.0)) + min(max(q[0], q[1], q[2]), 0.0))
+        if shape_type == GeoType.CAPSULE:
+            r, hh = shape_scale[0], shape_scale[1]
+            pz = max(-hh, min(float(v[2]), hh))
+            return np.linalg.norm(v - np.array([0, 0, pz])) - r
+        if shape_type == GeoType.CYLINDER:
+            r, hh = shape_scale[0], shape_scale[1]
+            dxy = np.linalg.norm(v[:2]) - r
+            dz = abs(v[2]) - hh
+            return float(np.linalg.norm(np.maximum([dxy, dz], 0.0)) + min(max(dxy, dz), 0.0))
+        return None
+
+    def _assert_vertices_at_offset(self, mesh, shape_type, shape_scale, offset, atol=None):
+        """Assert every vertex of *mesh* is approximately *offset* from the base surface.
+
+        For each vertex **v**, computes the analytical SDF of the un-inflated
+        shape.  That distance should be approximately equal to *offset* because
+        ``compute_offset_mesh`` bakes the offset into the SDF volume so the
+        zero-isosurface sits where ``sdf(v) == offset``.
+        """
+        if atol is None:
+            atol = offset * 0.15 + 0.02
+
+        verts = mesh.vertices
+        self.assertGreater(len(verts), 0, "Offset mesh has no vertices")
+        max_err = 0.0
+        for v in verts:
+            d = self._analytical_sdf(v, shape_type, shape_scale)
+            if d is None:
+                continue
+            err = abs(d - offset)
+            max_err = max(max_err, err)
+
+        self.assertLess(
+            max_err,
+            atol,
+            f"Max vertex distance error {max_err:.4f} exceeds tolerance {atol:.4f} "
+            f"for shape {shape_type}, scale {shape_scale}, offset {offset}",
+        )
+
+    def test_box_small_offset(self):
+        """Box with a small offset that stays within the original AABB."""
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.05, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.5, 0.35, 0.25), 0.05)
+
+    def test_box_large_offset(self):
+        """Box with an offset larger than its smallest half-extent."""
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.5, 0.35, 0.25), offset=0.5, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.5, 0.35, 0.25), 0.5)
+
+    def test_box_very_large_offset(self):
+        """Box with an offset much larger than the shape itself."""
+        mesh = compute_offset_mesh(GeoType.BOX, shape_scale=(0.2, 0.2, 0.2), offset=1.0, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.BOX, (0.2, 0.2, 0.2), 1.0)
+
+        extent = np.max(np.abs(mesh.vertices), axis=0)
+        for i in range(3):
+            self.assertGreater(
+                extent[i],
+                0.2 + 0.8,
+                f"Offset mesh extent along axis {i} ({extent[i]:.3f}) should exceed shape_scale + offset = {0.2 + 1.0}",
+            )
+
+    def test_sphere_large_offset(self):
+        """Sphere with a large offset — surface should be roughly spherical."""
+        r = 0.3
+        off = 0.7
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        dists = np.linalg.norm(mesh.vertices, axis=1)
+        expected_radius = r + off
+        np.testing.assert_allclose(dists, expected_radius, atol=0.05)
+
+    def test_capsule_large_offset(self):
+        """Capsule with offset exceeding its radius."""
+        r, hh = 0.2, 0.4
+        off = 0.6
+        mesh = compute_offset_mesh(GeoType.CAPSULE, shape_scale=(r, hh, 0.0), offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        self._assert_vertices_at_offset(mesh, GeoType.CAPSULE, (r, hh, 0.0), off)
+
+    def test_cylinder_large_offset(self):
+        """Cylinder with offset exceeding its radius."""
+        r, hh = 0.3, 0.5
+        off = 0.8
+        mesh = compute_offset_mesh(GeoType.CYLINDER, shape_scale=(r, hh, 0.0), offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        self._assert_vertices_at_offset(mesh, GeoType.CYLINDER, (r, hh, 0.0), off)
+
+    def test_plane_returns_none(self):
+        """Plane should return None (not supported)."""
+        mesh = compute_offset_mesh(GeoType.PLANE, shape_scale=(1.0, 1.0, 1.0), offset=0.1, device=self.device)
+        self.assertIsNone(mesh)
+
+    def test_hfield_returns_none(self):
+        """Heightfield should return None (not supported)."""
+        mesh = compute_offset_mesh(GeoType.HFIELD, shape_scale=(1.0, 1.0, 1.0), offset=0.1, device=self.device)
+        self.assertIsNone(mesh)
+
+    def test_zero_offset(self):
+        """Zero offset should produce a mesh approximating the original surface."""
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(0.5, 0.5, 0.5), offset=0.0, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        dists = np.linalg.norm(mesh.vertices, axis=1)
+        np.testing.assert_allclose(dists, 0.5, atol=0.03)
+
+    def test_mesh_shape_large_offset(self):
+        """Mesh (box geometry) with large offset."""
+        box_mesh = create_box_mesh((0.3, 0.3, 0.3))
+        off = 0.5
+        mesh = compute_offset_mesh(GeoType.MESH, shape_geo=box_mesh, offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        extent = np.max(np.abs(mesh.vertices), axis=0)
+        for i in range(3):
+            self.assertGreater(
+                extent[i],
+                0.3 + off * 0.5,
+                f"Mesh offset extent along axis {i} ({extent[i]:.3f}) too small",
+            )
+
+
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
+class TestExtractIsomesh(unittest.TestCase):
+    """Test SDF.extract_isomesh and compute_isomesh with isovalue parameter.
+
+    Uses a box mesh with a pre-built SDF.  Validates that every vertex of the
+    extracted isosurface sits at the correct signed distance from the original
+    box, measured with the analytical box SDF as ground truth.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        wp.init()
+        cls.half_extents = (0.3, 0.3, 0.3)
+        cls.mesh = create_box_mesh(cls.half_extents)
+        cls.mesh.build_sdf(max_resolution=64)
+
+    @staticmethod
+    def _box_sdf(v, hx, hy, hz):
+        q = np.abs(v) - np.array([hx, hy, hz])
+        return float(np.linalg.norm(np.maximum(q, 0.0)) + min(max(q[0], q[1], q[2]), 0.0))
+
+    def _assert_box_vertices_at_isovalue(self, iso_mesh, isovalue, atol=0.03):
+        """Assert every vertex of *iso_mesh* sits at *isovalue* from the box surface."""
+        hx, hy, hz = self.half_extents
+        verts = iso_mesh.vertices
+        errors = np.array([abs(self._box_sdf(v, hx, hy, hz) - isovalue) for v in verts])
+        max_err = float(errors.max())
+        self.assertLess(
+            max_err,
+            atol,
+            f"Max vertex SDF error {max_err:.4f} exceeds {atol} for isovalue={isovalue} (mean {errors.mean():.4f})",
+        )
+
+    def test_extract_isomesh_zero_isovalue(self):
+        """extract_isomesh at isovalue=0: every vertex should be on the original box surface."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        result = sdf.extract_isomesh(isovalue=0.0)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, 0.0)
+
+    def test_extract_isomesh_positive_isovalue(self):
+        """extract_isomesh at positive isovalue: vertices at the inflated distance."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        offset = 0.04
+        result = sdf.extract_isomesh(isovalue=offset)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, offset)
+
+    def test_extract_isomesh_returns_none_outside_band(self):
+        """extract_isomesh at isovalue far outside the narrow band returns None."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        result = sdf.extract_isomesh(isovalue=10.0)
+        self.assertIsNone(result)
+
+    def test_compute_isomesh_with_isovalue(self):
+        """compute_isomesh with non-zero isovalue: vertices at the offset distance."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        sparse_vol = sdf.sparse_volume
+        self.assertIsNotNone(sparse_vol)
+        offset = 0.04
+        result = compute_isomesh(sparse_vol, isovalue=offset)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, offset)
+
+    def test_compute_offset_mesh_with_prebuilt_sdf(self):
+        """compute_offset_mesh via pre-built SDF: vertices at the offset distance."""
+        offset = 0.04
+        result = compute_offset_mesh(GeoType.MESH, shape_geo=self.mesh, offset=offset)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+        self._assert_box_vertices_at_isovalue(result, offset)
+
+    def test_isovalue_changes_surface_consistently(self):
+        """Larger isovalue produces a strictly larger mesh than smaller isovalue."""
+        sdf = self.mesh.sdf
+        self.assertIsNotNone(sdf)
+        mesh_small = sdf.extract_isomesh(isovalue=0.02)
+        mesh_large = sdf.extract_isomesh(isovalue=0.06)
+        self.assertIsNotNone(mesh_small)
+        self.assertIsNotNone(mesh_large)
+        extent_small = np.max(np.abs(mesh_small.vertices), axis=0)
+        extent_large = np.max(np.abs(mesh_large.vertices), axis=0)
+        for i in range(3):
+            self.assertGreater(
+                extent_large[i],
+                extent_small[i],
+                f"Larger isovalue should produce larger extent on axis {i}: "
+                f"{extent_large[i]:.4f} vs {extent_small[i]:.4f}",
+            )
+
+    def test_extract_isomesh_sparse_fallback_with_shape_margin(self):
+        """Sparse-volume fallback in extract_isomesh compensates for baked shape_margin."""
+        hx, hy, hz = 0.3, 0.3, 0.3
+        margin_val = 0.04
+        mesh = create_box_mesh((hx, hy, hz))
+        sdf = SDF.create_from_mesh(mesh, shape_margin=margin_val, max_resolution=64)
+        self.assertIsNotNone(sdf)
+        self.assertEqual(sdf.shape_margin, margin_val)
+
+        # Force sparse-volume fallback by clearing texture data
+        sdf.texture_data = None
+        sdf._coarse_texture = None
+        sdf._subgrid_texture = None
+
+        result = sdf.extract_isomesh(isovalue=margin_val)
+        self.assertIsNotNone(result)
+        self.assertGreater(result.vertices.shape[0], 0)
+
+        # Vertices should sit at ~margin_val (0.04) from the base box surface.
+        # Without the shape_margin correction the surface would be at
+        # 2*margin_val = 0.08, giving errors of ~0.04.  A tolerance of 0.025
+        # catches that regression while allowing marching-cubes discretization.
+        errors = np.array([abs(self._box_sdf(v, hx, hy, hz) - margin_val) for v in result.vertices])
+        max_err = float(errors.max())
+        self.assertLess(
+            max_err,
+            0.025,
+            f"Sparse fallback with shape_margin: max vertex error {max_err:.4f} "
+            f"exceeds tolerance 0.025 (shape_margin={margin_val}). "
+            f"Mean error: {float(errors.mean()):.4f}",
+        )
+
+
+@unittest.skipUnless(_cuda_available, "wp.Volume requires CUDA device")
+class TestComputeOffsetMeshAdditionalPrimitives(unittest.TestCase):
+    """Test compute_offset_mesh for primitives not covered by TestComputeOffsetMesh.
+
+    Adds analytical SDF references for ellipsoid and cone, validating vertex
+    positions with the same rigour as ``TestComputeOffsetMesh._assert_vertices_at_offset``.
+    """
+
+    device = "cuda:0"
+
+    @staticmethod
+    def _analytical_sdf(v, shape_type, shape_scale):
+        """Evaluate analytical SDF for a primitive at point *v*."""
+        if shape_type == GeoType.ELLIPSOID:
+            rx, ry, rz = shape_scale[:3]
+            eps = 1e-8
+            r = np.array([max(abs(rx), eps), max(abs(ry), eps), max(abs(rz), eps)])
+            q0 = v / r
+            q1 = v / (r * r)
+            k0 = np.linalg.norm(q0)
+            k1 = np.linalg.norm(q1)
+            if k1 > eps:
+                return float(k0 * (k0 - 1.0) / k1)
+            return float(-min(r))
+        if shape_type == GeoType.CONE:
+            bottom_r, hh = shape_scale[0], shape_scale[1]
+            top_r = 0.0
+            # cone SDF with Z up-axis
+            r_xy = np.linalg.norm(v[:2])
+            q = np.array([r_xy, v[2]])
+            k1 = np.array([top_r, hh])
+            k2 = np.array([top_r - bottom_r, 2.0 * hh])
+            if q[1] < 0.0:
+                ca = np.array([q[0] - min(q[0], bottom_r), abs(q[1]) - hh])
+            else:
+                ca = np.array([q[0] - min(q[0], top_r), abs(q[1]) - hh])
+            denom = np.dot(k2, k2)
+            t = 0.0
+            if denom > 0.0:
+                t = float(np.clip(np.dot(k1 - q, k2) / denom, 0.0, 1.0))
+            cb = q - k1 + k2 * t
+            sign = -1.0 if cb[0] < 0.0 and ca[1] < 0.0 else 1.0
+            return float(sign * np.sqrt(min(np.dot(ca, ca), np.dot(cb, cb))))
+        return None
+
+    def _assert_vertices_at_offset(self, mesh, shape_type, shape_scale, offset, atol=None):
+        """Assert every vertex is approximately *offset* from the base surface."""
+        if atol is None:
+            atol = offset * 0.15 + 0.02
+        self.assertGreater(len(mesh.vertices), 0, "Offset mesh has no vertices")
+        max_err = 0.0
+        for v in mesh.vertices:
+            d = self._analytical_sdf(v, shape_type, shape_scale)
+            if d is None:
+                continue
+            max_err = max(max_err, abs(d - offset))
+        self.assertLess(
+            max_err,
+            atol,
+            f"Max vertex distance error {max_err:.4f} exceeds {atol:.4f} "
+            f"for shape {shape_type}, scale {shape_scale}, offset {offset}",
+        )
+
+    def test_ellipsoid_offset(self):
+        """Ellipsoid offset mesh: every vertex at the correct signed distance."""
+        sx, sy, sz = 0.4, 0.3, 0.2
+        off = 0.3
+        mesh = compute_offset_mesh(GeoType.ELLIPSOID, shape_scale=(sx, sy, sz), offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.ELLIPSOID, (sx, sy, sz), off)
+
+    def test_cone_offset(self):
+        """Cone offset mesh: every vertex at the correct signed distance."""
+        r, hh = 0.25, 0.4
+        off = 0.3
+        mesh = compute_offset_mesh(GeoType.CONE, shape_scale=(r, hh, 0.0), offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        self._assert_vertices_at_offset(mesh, GeoType.CONE, (r, hh, 0.0), off)
+
+    def test_compute_offset_mesh_analytical_unsupported_type(self):
+        """compute_offset_mesh_analytical returns None for non-analytical types."""
+        result = compute_offset_mesh_analytical(GeoType.MESH, shape_scale=(1, 1, 1), offset=0.1, device=self.device)
+        self.assertIsNone(result)
+
+    def test_tiny_sphere_offset_mesh(self):
+        """A 1 mm sphere should still produce a valid offset mesh with adaptive resolution."""
+        r = 0.001
+        off = 0.0005
+        expected_radius = r + off  # 0.0015
+        mesh = compute_offset_mesh(GeoType.SPHERE, shape_scale=(r, r, r), offset=off, device=self.device)
+        self.assertIsNotNone(mesh, "Tiny sphere offset mesh should not be None with adaptive resolution")
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        dists = np.linalg.norm(mesh.vertices, axis=1)
+        # Tolerance is 15% of expected radius — tight enough to catch a
+        # coarse-grid failure while allowing for marching-cubes discretization.
+        np.testing.assert_allclose(dists, expected_radius, atol=expected_radius * 0.15)
+
+    def test_convex_mesh_offset_mesh(self):
+        """compute_offset_mesh with CONVEX_MESH produces a geometrically correct offset surface."""
+        hx, hy, hz = 0.3, 0.3, 0.3
+        box_mesh = create_box_mesh((hx, hy, hz))
+        off = 0.1
+        mesh = compute_offset_mesh(GeoType.CONVEX_MESH, shape_geo=box_mesh, offset=off, device=self.device)
+        self.assertIsNotNone(mesh)
+        self.assertGreater(mesh.vertices.shape[0], 0)
+        max_err = 0.0
+        for v in mesh.vertices:
+            q = np.abs(v) - np.array([hx, hy, hz])
+            box_dist = float(np.linalg.norm(np.maximum(q, 0.0)) + min(max(q[0], q[1], q[2]), 0.0))
+            max_err = max(max_err, abs(box_dist - off))
+        self.assertLess(
+            max_err,
+            off * 0.15 + 0.02,
+            f"CONVEX_MESH offset mesh: max vertex distance error {max_err:.4f} for offset {off}",
+        )
+
+    def test_compute_isomesh_empty_volume(self):
+        """compute_isomesh with isovalue far from any surface returns None."""
+        box_mesh = create_box_mesh((0.2, 0.2, 0.2))
+        _, sparse_vol, _, _ = compute_sdf_from_shape(
+            shape_geo=box_mesh,
+            shape_type=GeoType.MESH,
+            shape_margin=0.0,
+            max_resolution=16,
+            narrow_band_distance=(-0.05, 0.05),
+        )
+        self.assertIsNotNone(sparse_vol)
+        result = compute_isomesh(sparse_vol, isovalue=10.0)
+        self.assertIsNone(result)
 
 
 class TestSDFNonUniformScaleBrickPyramid(unittest.TestCase):
@@ -986,17 +1641,17 @@ def test_brick_pyramid_stability(test, device):
     stays in place after simulation.
     """
     builder = newton.ModelBuilder()
-    builder.rigid_contact_margin = 0.005
+    builder.rigid_gap = 0.005
 
     # Add ground plane
     builder.add_shape_plane(-1, wp.transform_identity(), width=0.0, length=0.0)
 
     # Create unit cube mesh (will be scaled non-uniformly)
     cube_mesh = create_box_mesh((0.5, 0.5, 0.5))
+    cube_mesh.build_sdf(max_resolution=32, device=device)
 
     # Configure shape with SDF enabled
     mesh_cfg = newton.ModelBuilder.ShapeConfig()
-    mesh_cfg.sdf_max_resolution = 32
 
     # Brick dimensions via non-uniform scale
     brick_scale = (0.4, 0.2, 0.1)  # Wide, medium depth, thin
@@ -1036,12 +1691,11 @@ def test_brick_pyramid_stability(test, device):
     initial_top_pos = initial_state.body_q.numpy()[top_brick_body][:3].copy()
 
     # Create collision pipeline and solver
-    collision_pipeline = newton.CollisionPipelineUnified.from_model(
+    collision_pipeline = newton.CollisionPipeline(
         model,
-        rigid_contact_max_per_pair=10,
-        broad_phase_mode=newton.BroadPhaseMode.NXN,
-        reduce_contacts=True,
+        broad_phase="nxn",
     )
+    contacts = collision_pipeline.contacts()
     solver = newton.solvers.SolverXPBD(model, iterations=10, rigid_contact_relaxation=0.8)
 
     # Simulate for a short time
@@ -1055,7 +1709,7 @@ def test_brick_pyramid_stability(test, device):
 
     for _ in range(num_steps):
         state_0.clear_forces()
-        contacts = model.collide(state_0, collision_pipeline=collision_pipeline)
+        collision_pipeline.collide(state_0, contacts)
         solver.step(state_0, state_1, control, contacts, dt)
         state_0, state_1 = state_1, state_0
 

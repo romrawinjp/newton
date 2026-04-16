@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import os
 import sys
@@ -32,7 +20,7 @@ from newton.utils import EventTracer
 
 
 @wp.kernel
-def apply_random_control(state: wp.uint32, joint_target: wp.array(dtype=float)):
+def apply_random_control(state: wp.uint32, joint_target: wp.array[float]):
     tid = wp.tid()
 
     joint_target[tid] = wp.randf(state) * 2.0 - 1.0
@@ -46,14 +34,14 @@ class _FastBenchmark:
     number = 1
     rounds = 2
     repeat = None
-    num_worlds = None
+    world_count = None
     random_init = None
     environment = "None"
 
     def setup(self):
         if not hasattr(self, "builder") or self.builder is None:
             self.builder = Example.create_model_builder(
-                self.robot, self.num_worlds, randomize=self.random_init, seed=123
+                self.robot, self.world_count, randomize=self.random_init, seed=123
             )
 
         self.example = Example(
@@ -96,7 +84,7 @@ class _FastBenchmark:
 class _KpiBenchmark:
     """Utility base class for KPI benchmarks."""
 
-    param_names = ["num_worlds"]
+    param_names = ["world_count"]
     num_frames = None
     params = None
     robot = None
@@ -105,16 +93,16 @@ class _KpiBenchmark:
     random_init = None
     environment = "None"
 
-    def setup(self, num_worlds):
+    def setup(self, world_count):
         if not hasattr(self, "builder") or self.builder is None:
             self.builder = {}
-        if num_worlds not in self.builder:
-            self.builder[num_worlds] = Example.create_model_builder(
-                self.robot, num_worlds, randomize=self.random_init, seed=123
+        if world_count not in self.builder:
+            self.builder[world_count] = Example.create_model_builder(
+                self.robot, world_count, randomize=self.random_init, seed=123
             )
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def track_simulate(self, num_worlds):
+    def track_simulate(self, world_count):
         total_time = 0.0
         for _iter in range(self.samples):
             example = Example(
@@ -124,7 +112,7 @@ class _KpiBenchmark:
                 headless=True,
                 actuation="random",
                 use_cuda_graph=True,
-                builder=self.builder[num_worlds],
+                builder=self.builder[world_count],
                 ls_iteration=self.ls_iteration,
                 environment=self.environment,
             )
@@ -135,7 +123,7 @@ class _KpiBenchmark:
             wp.synchronize_device()
             total_time += example.benchmark_time
 
-        return total_time * 1000 / (self.num_frames * example.sim_substeps * num_worlds * self.samples)
+        return total_time * 1000 / (self.num_frames * example.sim_substeps * world_count * self.samples)
 
     track_simulate.unit = "ms/world-step"
 
@@ -143,7 +131,7 @@ class _KpiBenchmark:
 class _NewtonOverheadBenchmark:
     """Utility base class for measuring Newton overhead."""
 
-    param_names = ["num_worlds"]
+    param_names = ["world_count"]
     num_frames = None
     params = None
     robot = None
@@ -151,16 +139,16 @@ class _NewtonOverheadBenchmark:
     ls_iteration = None
     random_init = None
 
-    def setup(self, num_worlds):
+    def setup(self, world_count):
         if not hasattr(self, "builder") or self.builder is None:
             self.builder = {}
-        if num_worlds not in self.builder:
-            self.builder[num_worlds] = Example.create_model_builder(
-                self.robot, num_worlds, randomize=self.random_init, seed=123
+        if world_count not in self.builder:
+            self.builder[world_count] = Example.create_model_builder(
+                self.robot, world_count, randomize=self.random_init, seed=123
             )
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def track_simulate(self, num_worlds):
+    def track_simulate(self, world_count):
         trace = {}
         with EventTracer(enabled=True) as tracer:
             for _iter in range(self.samples):
@@ -170,9 +158,9 @@ class _NewtonOverheadBenchmark:
                     randomize=self.random_init,
                     headless=True,
                     actuation="random",
-                    num_worlds=num_worlds,
+                    world_count=world_count,
                     use_cuda_graph=True,
-                    builder=self.builder[num_worlds],
+                    builder=self.builder[world_count],
                     ls_iteration=self.ls_iteration,
                 )
 
@@ -181,7 +169,8 @@ class _NewtonOverheadBenchmark:
                     trace = tracer.add_trace(trace, tracer.trace())
 
         step_time = trace["step"][0]
-        mujoco_warp_step_time = trace["step"][1]["mujoco_warp_step"][0]
+        step_trace = trace["step"][1]
+        mujoco_warp_step_time = step_trace["_mujoco_warp_step"][0]
         overhead = 100.0 * (step_time - mujoco_warp_step_time) / step_time
         return overhead
 
@@ -192,7 +181,7 @@ class FastCartpole(_FastBenchmark):
     num_frames = 50
     robot = "cartpole"
     repeat = 8
-    num_worlds = 256
+    world_count = 256
     random_init = True
     environment = "None"
 
@@ -211,7 +200,7 @@ class FastG1(_FastBenchmark):
     num_frames = 25
     robot = "g1"
     repeat = 2
-    num_worlds = 256
+    world_count = 256
     random_init = True
     environment = "None"
 
@@ -250,7 +239,7 @@ class FastHumanoid(_FastBenchmark):
     num_frames = 50
     robot = "humanoid"
     repeat = 8
-    num_worlds = 256
+    world_count = 256
     random_init = True
     environment = "None"
 
@@ -287,7 +276,7 @@ class FastAllegro(_FastBenchmark):
     num_frames = 100
     robot = "allegro"
     repeat = 2
-    num_worlds = 256
+    world_count = 256
     random_init = False
     environment = "None"
 
@@ -306,7 +295,7 @@ class FastKitchenG1(_FastBenchmark):
     num_frames = 25
     robot = "g1"
     repeat = 2
-    num_worlds = 32
+    world_count = 32
     random_init = True
     environment = "kitchen"
 
@@ -346,7 +335,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        "-b", "--bench", default=None, action="append", choices=benchmark_list.keys(), help="Run a single benchmark."
+        "-b",
+        "--bench",
+        default=None,
+        action="append",
+        choices=benchmark_list.keys(),
+        help="Run a specific benchmark; may be repeated to run multiple (e.g., --bench A --bench B).",
     )
     args = parser.parse_known_args()[0]
 

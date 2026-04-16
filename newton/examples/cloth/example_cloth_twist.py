@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Cloth Twist
@@ -41,14 +29,14 @@ from newton import ParticleFlags
 @wp.kernel
 def initialize_rotation(
     # input
-    vertex_indices_to_rot: wp.array(dtype=wp.int32),
-    pos: wp.array(dtype=wp.vec3),
-    rot_centers: wp.array(dtype=wp.vec3),
-    rot_axes: wp.array(dtype=wp.vec3),
-    t: wp.array(dtype=float),
+    vertex_indices_to_rot: wp.array[wp.int32],
+    pos: wp.array[wp.vec3],
+    rot_centers: wp.array[wp.vec3],
+    rot_axes: wp.array[wp.vec3],
+    t: wp.array[float],
     # output
-    roots: wp.array(dtype=wp.vec3),
-    roots_to_ps: wp.array(dtype=wp.vec3),
+    roots: wp.array[wp.vec3],
+    roots_to_ps: wp.array[wp.vec3],
 ):
     tid = wp.tid()
     v_index = vertex_indices_to_rot[wp.tid()]
@@ -72,17 +60,17 @@ def initialize_rotation(
 @wp.kernel
 def apply_rotation(
     # input
-    vertex_indices_to_rot: wp.array(dtype=wp.int32),
-    rot_axes: wp.array(dtype=wp.vec3),
-    roots: wp.array(dtype=wp.vec3),
-    roots_to_ps: wp.array(dtype=wp.vec3),
-    t: wp.array(dtype=float),
+    vertex_indices_to_rot: wp.array[wp.int32],
+    rot_axes: wp.array[wp.vec3],
+    roots: wp.array[wp.vec3],
+    roots_to_ps: wp.array[wp.vec3],
+    t: wp.array[float],
     angular_velocity: float,
     dt: float,
     end_time: float,
     # output
-    pos_0: wp.array(dtype=wp.vec3),
-    pos_1: wp.array(dtype=wp.vec3),
+    pos_0: wp.array[wp.vec3],
+    pos_1: wp.array[wp.vec3],
 ):
     cur_t = t[0]
     if cur_t > end_time:
@@ -124,7 +112,7 @@ def apply_rotation(
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -192,14 +180,15 @@ class Example:
         self.solver = newton.solvers.SolverVBD(
             self.model,
             self.iterations,
-            handle_self_contact=True,
-            self_contact_radius=0.002,
-            self_contact_margin=0.0035,
+            particle_enable_self_contact=True,
+            particle_self_contact_radius=0.002,
+            particle_self_contact_margin=0.0035,
         )
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        self.contacts = self.model.contacts()
 
         rot_axes = [[0, 1, 0]] * len(right_side) + [[0, -1, 0]] * len(left_side)
 
@@ -228,6 +217,7 @@ class Example:
         )
 
         self.viewer.set_model(self.model)
+        self.viewer.set_camera(wp.vec3(2.25, 0.0, 0.0), 0.0, -180.0)
 
         # put graph capture into it's own function
         self.capture()
@@ -240,7 +230,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.model.collide(self.state_0, self.contacts)
         self.solver.rebuild_bvh(self.state_0)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
@@ -297,7 +287,7 @@ class Example:
         newton.examples.test_particle_state(
             self.state_0,
             "particles are within a reasonable volume",
-            lambda q, qd: newton.utils.vec_inside_limits(q, p_lower, p_upper),
+            lambda q, qd: newton.math.vec_inside_limits(q, p_lower, p_upper),
         )
         newton.examples.test_particle_state(
             self.state_0,
@@ -314,6 +304,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init(parser)
 
     # Create example and run
-    example = Example(viewer)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

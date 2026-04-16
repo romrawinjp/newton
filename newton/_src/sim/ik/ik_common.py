@@ -1,28 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Common enums and utility kernels shared across IK components."""
 
-from enum import Enum as _Enum
+from __future__ import annotations
+
+from enum import Enum
 
 import warp as wp
 
 from ..articulation import eval_single_articulation_fk
+from ..enums import BodyFlags
 
 
-class IKJacobianMode(_Enum):
+class IKJacobianType(Enum):
     """
     Specifies the backend used for Jacobian computation in inverse kinematics.
     """
@@ -39,21 +30,23 @@ class IKJacobianMode(_Enum):
 
 @wp.kernel
 def _eval_fk_articulation_batched(
-    articulation_start: wp.array1d(dtype=wp.int32),
-    joint_q: wp.array2d(dtype=wp.float32),
-    joint_qd: wp.array2d(dtype=wp.float32),
-    joint_q_start: wp.array1d(dtype=wp.int32),
-    joint_qd_start: wp.array1d(dtype=wp.int32),
-    joint_type: wp.array1d(dtype=wp.int32),
-    joint_parent: wp.array1d(dtype=wp.int32),
-    joint_child: wp.array1d(dtype=wp.int32),
-    joint_X_p: wp.array1d(dtype=wp.transform),
-    joint_X_c: wp.array1d(dtype=wp.transform),
-    joint_axis: wp.array1d(dtype=wp.vec3),
-    joint_dof_dim: wp.array2d(dtype=wp.int32),
-    body_com: wp.array1d(dtype=wp.vec3),
-    body_q: wp.array2d(dtype=wp.transform),
-    body_qd: wp.array2d(dtype=wp.spatial_vector),
+    articulation_start: wp.array[wp.int32],
+    joint_articulation: wp.array[int],
+    joint_q: wp.array2d[wp.float32],
+    joint_qd: wp.array2d[wp.float32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_parent: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_X_p: wp.array[wp.transform],
+    joint_X_c: wp.array[wp.transform],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    body_com: wp.array[wp.vec3],
+    body_flags: wp.array[wp.int32],
+    body_q: wp.array2d[wp.transform],
+    body_qd: wp.array2d[wp.spatial_vector],
 ):
     problem_idx, articulation_idx = wp.tid()
 
@@ -63,6 +56,7 @@ def _eval_fk_articulation_batched(
     eval_single_articulation_fk(
         joint_start,
         joint_end,
+        joint_articulation,
         joint_q[problem_idx],
         joint_qd[problem_idx],
         joint_q_start,
@@ -75,12 +69,14 @@ def _eval_fk_articulation_batched(
         joint_axis,
         joint_dof_dim,
         body_com,
+        body_flags,
+        int(BodyFlags.ALL),
         body_q[problem_idx],
         body_qd[problem_idx],
     )
 
 
-def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
+def eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
     """Compute batched forward kinematics for a set of articulations."""
     n_problems = joint_q.shape[0]
     wp.launch(
@@ -88,6 +84,7 @@ def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
         dim=[n_problems, model.articulation_count],
         inputs=[
             model.articulation_start,
+            model.joint_articulation,
             joint_q,
             joint_qd,
             model.joint_q_start,
@@ -100,6 +97,7 @@ def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
             model.joint_axis,
             model.joint_dof_dim,
             model.body_com,
+            model.body_flags,
         ],
         outputs=[body_q, body_qd],
         device=model.device,
@@ -107,10 +105,10 @@ def _eval_fk_batched(model, joint_q, joint_qd, body_q, body_qd):
 
 
 @wp.kernel
-def _fk_accum(
-    joint_parent: wp.array1d(dtype=wp.int32),
-    X_local: wp.array2d(dtype=wp.transform),
-    body_q: wp.array2d(dtype=wp.transform),
+def fk_accum(
+    joint_parent: wp.array[wp.int32],
+    X_local: wp.array2d[wp.transform],
+    body_q: wp.array2d[wp.transform],
 ):
     problem_idx, local_joint_idx = wp.tid()
     Xw = X_local[problem_idx, local_joint_idx]
@@ -122,10 +120,10 @@ def _fk_accum(
 
 
 @wp.kernel
-def _compute_costs(
-    residuals: wp.array2d(dtype=wp.float32),
+def compute_costs(
+    residuals: wp.array2d[wp.float32],
     num_residuals: int,
-    costs: wp.array1d(dtype=wp.float32),
+    costs: wp.array[wp.float32],
 ):
     problem_idx = wp.tid()
     cost = float(0.0)

@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Viewer
@@ -34,7 +22,7 @@ import newton.examples
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         self.viewer = viewer
 
         # self.colors and materials per instance
@@ -46,8 +34,9 @@ class Example:
         self.col_bunny = wp.array([wp.vec3(0.5, 0.2, 0.8)], dtype=wp.vec3)
         self.col_plane = wp.array([wp.vec3(0.125, 0.125, 0.15)], dtype=wp.vec3)
 
-        # material = (metallic, roughness, checker, unused)
+        # material = (roughness, metallic, checker, texture_enable)
         self.mat_default = wp.array([wp.vec4(0.0, 0.7, 0.0, 0.0)], dtype=wp.vec4)
+        self.mat_diffuse = wp.array([wp.vec4(0.8, 0.0, 1.0, 0.0)], dtype=wp.vec4)
         self.mat_plane = wp.array([wp.vec4(0.5, 0.5, 1.0, 0.0)], dtype=wp.vec4)
 
         # MESH (bunny)
@@ -91,10 +80,35 @@ class Example:
         self.time = 0.0
         self.spacing = 2.0
 
+        # Renderer settings
+        self.renderer = getattr(self.viewer, "renderer", None)
+
     def gui(self, ui):
         ui.text("Custom UI text")
         _changed, self.time = ui.slider_float("Time", self.time, 0.0, 100.0)
         _changed, self.spacing = ui.slider_float("Spacing", self.spacing, 0.0, 10.0)
+
+        if self.renderer is not None:
+            ui.separator()
+            ui.text("Renderer Settings")
+            changed, value = ui.slider_float("Exposure", self.renderer.exposure, 0.0, 5.0)
+            if changed:
+                self.renderer.exposure = value
+            changed, value = ui.slider_float("Diffuse Scale", self.renderer.diffuse_scale, 0.0, 5.0)
+            if changed:
+                self.renderer.diffuse_scale = value
+            changed, value = ui.slider_float("Specular Scale", self.renderer.specular_scale, 0.0, 5.0)
+            if changed:
+                self.renderer.specular_scale = value
+            changed, value = ui.slider_float("Shadow Radius", self.renderer.shadow_radius, 0.0, 10.0)
+            if changed:
+                self.renderer.shadow_radius = value
+            changed, value = ui.slider_float("Shadow Extents", self.renderer.shadow_extents, 1.0, 50.0)
+            if changed:
+                self.renderer.shadow_extents = value
+            changed, value = ui.checkbox("Spotlight", self.renderer.spotlight_enabled)
+            if changed:
+                self.renderer.spotlight_enabled = value
 
     def step(self):
         pass
@@ -126,7 +140,7 @@ class Example:
         x_cone_anim = wp.array([wp.transform([0.0, base_left, base_height], qy_slow)], dtype=wp.transform)
         base_left += self.spacing
 
-        # Cylinder: spinning on different axis at y = 2
+        # Cylinder: spinning about its local Z axis at y = 2
         x_cyl_anim = wp.array([wp.transform([0.0, base_left, base_height], qz_slow)], dtype=wp.transform)
         base_left += self.spacing
 
@@ -170,7 +184,7 @@ class Example:
             (0.35, 1.0),
             x_cyl_anim,
             self.col_cylinder,
-            self.mat_default,
+            self.mat_diffuse,
         )
         self.viewer.log_shapes(
             "/capsule_instance",
@@ -215,5 +229,5 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init()
 
     # Create viewer and run
-    example = Example(viewer)
+    example = Example(viewer, args)
     newton.examples.run(example, args)

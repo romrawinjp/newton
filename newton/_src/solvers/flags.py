@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Solver flags."""
 
@@ -34,19 +22,25 @@ class SolverNotifyFlags(IntEnum):
     """Indicates joint DOF property updates: joint_target_ke, joint_target_kd, joint_effort_limit, joint_armature, joint_friction, joint_limit_ke, joint_limit_kd, joint_limit_lower, joint_limit_upper."""
 
     BODY_PROPERTIES = 1 << 2
-    """Indicates body property updates: body_q, body_qd."""
+    """Indicates body property updates: body_q, body_qd, body_flags."""
 
     BODY_INERTIAL_PROPERTIES = 1 << 3
     """Indicates body inertial property updates: body_com, body_inertia, body_inv_inertia, body_mass, body_inv_mass."""
 
     SHAPE_PROPERTIES = 1 << 4
-    """Indicates shape property updates: shape_transform, shape_scale, shape_collision_radius, shape_material_mu, shape_material_ke, shape_material_kd, rigid_contact_torsional_friction, rigid_contact_rolling_friction."""
+    """Indicates shape property updates: shape_transform, shape_scale, shape_collision_radius, shape_material_mu, shape_material_ke, shape_material_kd, rigid_contact_mu_torsional, rigid_contact_mu_rolling."""
 
     MODEL_PROPERTIES = 1 << 5
     """Indicates model property updates: gravity and other global parameters."""
 
-    EQUALITY_CONSTRAINT_PROPERTIES = 1 << 6
-    """Indicates equality constraint property updates: eq_solref."""
+    CONSTRAINT_PROPERTIES = 1 << 6
+    """Indicates constraint property updates: equality constraints (equality_constraint_anchor, equality_constraint_relpose, equality_constraint_polycoef, equality_constraint_torquescale, equality_constraint_enabled, mujoco.eq_solref, mujoco.eq_solimp) and mimic constraints (constraint_mimic_coef0, constraint_mimic_coef1, constraint_mimic_enabled)."""
+
+    TENDON_PROPERTIES = 1 << 7
+    """Indicates tendon properties: eg tendon_stiffness."""
+
+    ACTUATOR_PROPERTIES = 1 << 8
+    """Indicates actuator property updates: gains, biases, limits, etc."""
 
     ALL = (
         JOINT_PROPERTIES
@@ -55,7 +49,9 @@ class SolverNotifyFlags(IntEnum):
         | BODY_INERTIAL_PROPERTIES
         | SHAPE_PROPERTIES
         | MODEL_PROPERTIES
-        | EQUALITY_CONSTRAINT_PROPERTIES
+        | CONSTRAINT_PROPERTIES
+        | TENDON_PROPERTIES
+        | ACTUATOR_PROPERTIES
     )
     """Indicates all property updates."""
 

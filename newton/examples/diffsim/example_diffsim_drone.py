@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Diffsim Drone
@@ -29,15 +17,12 @@ import os
 import numpy as np
 import warp as wp
 import warp.optim
-import warp.render
 
 import newton
 import newton.examples
-
-# TODO: These should be imported from a public API once available
-# For now, implementing locally.
-from newton._src.geometry.kernels import box_sdf, capsule_sdf, cone_sdf, cylinder_sdf, mesh_sdf, plane_sdf, sphere_sdf
+from newton.geometry import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_mesh, sdf_plane, sdf_sphere
 from newton.tests.unittest_utils import most
+from newton.utils import bourke_color_map
 
 DEFAULT_DRONE_PATH = newton.examples.get_asset("crazyflie.usd")  # Path to input drone asset
 
@@ -60,20 +45,20 @@ class Propeller:
 
 @wp.kernel
 def increment_seed(
-    seed: wp.array(dtype=int),
+    seed: wp.array[int],
 ):
     seed[0] += 1
 
 
 @wp.kernel
 def sample_gaussian(
-    mean_trajectory: wp.array(dtype=float, ndim=3),
+    mean_trajectory: wp.array3d[float],
     noise_scale: float,
     num_control_points: int,
     control_dim: int,
-    control_limits: wp.array(dtype=float, ndim=2),
-    seed: wp.array(dtype=int),
-    rollout_trajectories: wp.array(dtype=float, ndim=3),
+    control_limits: wp.array2d[float],
+    seed: wp.array[int],
+    rollout_trajectories: wp.array3d[float],
 ):
     world_id, point_id, control_id = wp.tid()
     unique_id = (world_id * num_control_points + point_id) * control_dim + control_id
@@ -91,11 +76,11 @@ def sample_gaussian(
 
 @wp.kernel
 def replicate_states(
-    body_q_in: wp.array(dtype=wp.transform),
-    body_qd_in: wp.array(dtype=wp.spatial_vector),
+    body_q_in: wp.array[wp.transform],
+    body_qd_in: wp.array[wp.spatial_vector],
     bodies_per_world: int,
-    body_q_out: wp.array(dtype=wp.transform),
-    body_qd_out: wp.array(dtype=wp.spatial_vector),
+    body_q_out: wp.array[wp.transform],
+    body_qd_out: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
     world_offset = tid * bodies_per_world
@@ -106,14 +91,14 @@ def replicate_states(
 
 @wp.kernel
 def drone_cost(
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    targets: wp.array(dtype=wp.vec3),
-    prop_control: wp.array(dtype=float),
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    targets: wp.array[wp.vec3],
+    prop_control: wp.array[float],
     step: int,
     horizon_length: int,
     weighting: float,
-    cost: wp.array(dtype=wp.float32),
+    cost: wp.array[wp.float32],
 ):
     world_id = wp.tid()
     tf = body_q[world_id]
@@ -165,16 +150,16 @@ def drone_cost(
 
 @wp.kernel
 def collision_cost(
-    body_q: wp.array(dtype=wp.transform),
-    obstacle_ids: wp.array(dtype=int, ndim=2),
-    shape_X_bs: wp.array(dtype=wp.transform),
+    body_q: wp.array[wp.transform],
+    obstacle_ids: wp.array2d[int],
+    shape_X_bs: wp.array[wp.transform],
     # geo: wp.sim.ModelShapeGeometry,
-    shape_type: wp.array(dtype=int),
-    shape_scale: wp.array(dtype=wp.vec3),
-    shape_source_ptr: wp.array(dtype=wp.uint64),
+    shape_type: wp.array[int],
+    shape_scale: wp.array[wp.vec3],
+    shape_source_ptr: wp.array[wp.uint64],
     margin: float,
     weighting: float,
-    cost: wp.array(dtype=wp.float32),
+    cost: wp.array[wp.float32],
 ):
     world_id, obs_id = wp.tid()
     shape_index = obstacle_ids[world_id, obs_id]
@@ -194,28 +179,23 @@ def collision_cost(
     d = 1e6
 
     if geo_type == newton.GeoType.SPHERE:
-        d = sphere_sdf(wp.vec3(), geo_scale[0], x_local)
+        d = sdf_sphere(x_local, geo_scale[0])
     elif geo_type == newton.GeoType.BOX:
-        d = box_sdf(geo_scale, x_local)
+        d = sdf_box(x_local, geo_scale[0], geo_scale[1], geo_scale[2])
     elif geo_type == newton.GeoType.CAPSULE:
-        d = capsule_sdf(geo_scale[0], geo_scale[1], x_local)
+        d = sdf_capsule(x_local, geo_scale[0], geo_scale[1], int(newton.Axis.Z))
     elif geo_type == newton.GeoType.CYLINDER:
-        d = cylinder_sdf(geo_scale[0], geo_scale[1], x_local)
+        d = sdf_cylinder(x_local, geo_scale[0], geo_scale[1], int(newton.Axis.Z))
     elif geo_type == newton.GeoType.CONE:
-        d = cone_sdf(geo_scale[0], geo_scale[1], x_local)
+        d = sdf_cone(x_local, geo_scale[0], geo_scale[1], int(newton.Axis.Z))
     elif geo_type == newton.GeoType.MESH:
         mesh = shape_source_ptr[shape_index]
         min_scale = wp.min(geo_scale)
         max_dist = margin / min_scale
-        d = mesh_sdf(mesh, wp.cw_div(x_local, geo_scale), max_dist)
+        d = sdf_mesh(mesh, wp.cw_div(x_local, geo_scale), max_dist)
         d *= min_scale  # TODO fix this, mesh scaling needs to be handled properly
-    elif geo_type == newton.GeoType.SDF:
-        volume = shape_source_ptr[shape_index]
-        xpred_local = wp.volume_world_to_index(volume, wp.cw_div(x_local, geo_scale))
-        nn = wp.vec3(0.0, 0.0, 0.0)
-        d = wp.volume_sample_grad_f(volume, xpred_local, wp.Volume.LINEAR, nn)
     elif geo_type == newton.GeoType.PLANE:
-        d = plane_sdf(geo_scale[0], geo_scale[1], x_local)
+        d = sdf_plane(x_local, geo_scale[0] * 0.5, geo_scale[1] * 0.5)
 
     d = wp.max(d, 0.0)
     if d < margin:
@@ -225,8 +205,8 @@ def collision_cost(
 
 @wp.kernel
 def enforce_control_limits(
-    control_limits: wp.array(dtype=float, ndim=2),
-    control_points: wp.array(dtype=float, ndim=3),
+    control_limits: wp.array2d[float],
+    control_points: wp.array3d[float],
 ):
     world_id, t_id, control_id = wp.tid()
     lo, hi = control_limits[control_id, 0], control_limits[control_id, 1]
@@ -235,9 +215,9 @@ def enforce_control_limits(
 
 @wp.kernel
 def pick_best_trajectory(
-    rollout_trajectories: wp.array(dtype=float, ndim=3),
+    rollout_trajectories: wp.array3d[float],
     lowest_cost_id: int,
-    best_traj: wp.array(dtype=float, ndim=3),
+    best_traj: wp.array3d[float],
 ):
     t_id, control_id = wp.tid()
     best_traj[0, t_id, control_id] = rollout_trajectories[lowest_cost_id, t_id, control_id]
@@ -245,12 +225,12 @@ def pick_best_trajectory(
 
 @wp.kernel
 def interpolate_control_linear(
-    control_points: wp.array(dtype=float, ndim=3),
-    control_dofs: wp.array(dtype=int),
-    control_gains: wp.array(dtype=float),
+    control_points: wp.array3d[float],
+    control_dofs: wp.array[int],
+    control_gains: wp.array[float],
     t: float,
     torque_dim: int,
-    torques: wp.array(dtype=float),
+    torques: wp.array[float],
 ):
     world_id, control_id = wp.tid()
     t_id = int(t)
@@ -264,11 +244,11 @@ def interpolate_control_linear(
 
 @wp.kernel
 def compute_prop_wrenches(
-    props: wp.array(dtype=Propeller),
-    controls: wp.array(dtype=float),
-    body_q: wp.array(dtype=wp.transform),
-    body_com: wp.array(dtype=wp.vec3),
-    body_f: wp.array(dtype=wp.spatial_vector),
+    props: wp.array[Propeller],
+    controls: wp.array[float],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_f: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
     prop = props[tid]
@@ -338,7 +318,7 @@ class Drone:
 
         # Initialize the helper to build a physics scene.
         builder = newton.ModelBuilder()
-        builder.rigid_contact_margin = 0.05
+        builder.rigid_gap = 0.05
 
         # Initialize the rigid bodies, propellers, and colliders.
         props = []
@@ -349,7 +329,7 @@ class Drone:
         carbon_fiber_density = 1750.0  # kg / m^3
         for i in range(variation_count):
             # Register the drone as a rigid body in the simulation model.
-            body = builder.add_body(key=f"{name}_{i}")
+            body = builder.add_body(label=f"{name}_{i}")
 
             # Define the shapes making up the drone's rigid body.
             builder.add_shape_box(
@@ -783,7 +763,7 @@ class Example:
             max_cost = np.max(costs)
             for i in range(self.rollout_count):
                 # Flip colors, so red means best trajectory, blue worst.
-                color = wp.render.bourke_color_map(-max_cost, -min_cost, -costs[i])
+                color = bourke_color_map(-max_cost, -min_cost, -costs[i])
                 self.viewer.log_lines(
                     f"/rollout_{i}",
                     wp.array(positions[0:-1, i], dtype=wp.vec3),

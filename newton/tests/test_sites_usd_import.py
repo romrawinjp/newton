@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Tests for site parsing from USD files."""
 
@@ -19,7 +7,6 @@ import unittest
 
 import numpy as np
 import warp as wp
-from pxr import Usd
 
 import newton
 from newton import GeoType, ShapeFlags
@@ -28,12 +15,14 @@ from newton import GeoType, ShapeFlags
 class TestUSDSiteImport(unittest.TestCase):
     """Test parsing sites from USD files."""
 
-    def _create_usd_stage(self, usd_content: str) -> Usd.Stage:
+    def _create_usd_stage(self, usd_content: str):
         """Create a USD stage in memory from the given content.
 
         Uses ImportFromString() instead of programmatic stage construction to allow
         applying unregistered API schemas (like MjcSiteAPI) without requiring schema plugins.
         """
+        from pxr import Usd
+
         stage = Usd.Stage.CreateInMemory()
         stage.GetRootLayer().ImportFromString(usd_content)
         return stage
@@ -80,7 +69,7 @@ def Xform "World"
 
         # Find site
         shape_flags = model.shape_flags.numpy()
-        shape_keys = model.shape_key
+        shape_keys = model.shape_label
         shape_types = model.shape_type.numpy()
 
         site_idx = None
@@ -158,7 +147,7 @@ def Xform "World"
         found_sites = []
 
         shape_flags = model.shape_flags.numpy()
-        shape_keys = model.shape_key
+        shape_keys = model.shape_label
 
         for i in range(model.shape_count):
             if shape_flags[i] & ShapeFlags.SITE:
@@ -236,7 +225,7 @@ def Xform "World"
         }
 
         shape_flags = model.shape_flags.numpy()
-        shape_keys = model.shape_key
+        shape_keys = model.shape_label
         shape_types = model.shape_type.numpy()
 
         for i in range(model.shape_count):
@@ -285,7 +274,7 @@ def Xform "World"
         model = builder.finalize()
 
         shape_flags = model.shape_flags.numpy()
-        shape_keys = model.shape_key
+        shape_keys = model.shape_label
         shape_transforms = model.shape_transform.numpy()
 
         # Find sites and check orientations
@@ -354,7 +343,7 @@ def Xform "World"
         model = builder.finalize()
 
         shape_flags = model.shape_flags.numpy()
-        shape_keys = model.shape_key
+        shape_keys = model.shape_label
 
         # Count sites
         site_count = 0

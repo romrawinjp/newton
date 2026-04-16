@@ -1,23 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example MPM 2-Way Coupling
 #
 # A simple scene spawning a dozen rigid shapes above a plane. The shapes
-# fall and collide using the XPBD solver. Demonstrates basic builder APIs
+# fall and collide using the MuJoCo solver. Demonstrates basic builder APIs
 # and the standard example structure.
 #
 # Command: python -m newton.examples mpm_twoway_coupling
@@ -37,13 +25,13 @@ from newton.solvers import SolverImplicitMPM
 @wp.kernel
 def compute_body_forces(
     dt: float,
-    collider_ids: wp.array(dtype=int),
-    collider_impulses: wp.array(dtype=wp.vec3),
-    collider_impulse_pos: wp.array(dtype=wp.vec3),
-    body_ids: wp.array(dtype=int),
-    body_q: wp.array(dtype=wp.transform),
-    body_com: wp.array(dtype=wp.vec3),
-    body_f: wp.array(dtype=wp.spatial_vector),
+    collider_ids: wp.array[int],
+    collider_impulses: wp.array[wp.vec3],
+    collider_impulse_pos: wp.array[wp.vec3],
+    body_ids: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_com: wp.array[wp.vec3],
+    body_f: wp.array[wp.spatial_vector],
 ):
     """Compute forces applied by sand to rigid bodies.
 
@@ -70,13 +58,13 @@ def compute_body_forces(
 @wp.kernel
 def subtract_body_force(
     dt: float,
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_f: wp.array(dtype=wp.spatial_vector),
-    body_inv_inertia: wp.array(dtype=wp.mat33),
-    body_inv_mass: wp.array(dtype=float),
-    body_q_res: wp.array(dtype=wp.transform),
-    body_qd_res: wp.array(dtype=wp.spatial_vector),
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_f: wp.array[wp.spatial_vector],
+    body_inv_inertia: wp.array[wp.mat33],
+    body_inv_mass: wp.array[float],
+    body_q_res: wp.array[wp.transform],
+    body_qd_res: wp.array[wp.spatial_vector],
 ):
     """Update the rigid bodies velocity to remove the forces applied by sand at the last step.
 
@@ -98,7 +86,7 @@ def subtract_body_force(
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         self.fps = 100
         self.frame_dt = 1.0 / self.fps
@@ -118,6 +106,10 @@ class Example:
 
         # setup sand model builder
         sand_builder = newton.ModelBuilder()
+
+        # Register MPM custom attributes before adding particles
+        SolverImplicitMPM.register_custom_attributes(sand_builder)
+
         voxel_size = 0.05  # 5 cm
         self._emit_particles(sand_builder, voxel_size)
 
@@ -125,14 +117,9 @@ class Example:
         self.model = builder.finalize()
         self.sand_model = sand_builder.finalize()
 
-        # basic particle material params
-        self.sand_model.particle_mu = 0.48
-        self.sand_model.particle_ke = 1.0e15
-
         # setup mpm solver
-        mpm_options = SolverImplicitMPM.Options()
+        mpm_options = SolverImplicitMPM.Config()
         mpm_options.voxel_size = voxel_size
-        mpm_options.tolerance = 1.0e-6
         mpm_options.grid_type = "fixed"  # fixed grid so we can graph-capture
         mpm_options.grid_padding = 50
         mpm_options.max_active_cell_count = 1 << 15
@@ -141,24 +128,25 @@ class Example:
         mpm_options.max_iterations = 50
         mpm_options.critical_fraction = 0.0
 
-        mpm_model = SolverImplicitMPM.Model(self.sand_model, mpm_options)
+        self.mpm_solver = SolverImplicitMPM(self.sand_model, mpm_options)
         # read colliders from the RB model rather than the sand model
-        mpm_model.setup_collider(model=self.model)
-
-        self.mpm_solver = SolverImplicitMPM(mpm_model, mpm_options)
+        self.mpm_solver.setup_collider(model=self.model)
 
         # setup rigid-body solver
-        self.solver = newton.solvers.SolverXPBD(self.model)
+        self.solver = newton.solvers.SolverMuJoCo(self.model, use_mujoco_contacts=False, njmax=100)
 
         # simulation state
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
 
         self.sand_state_0 = self.sand_model.state()
-        self.mpm_solver.enrich_state(self.sand_state_0)
+        self.sand_state_0.body_q = wp.empty_like(self.state_0.body_q)
+        self.sand_state_0.body_qd = wp.empty_like(self.state_0.body_qd)
+        self.sand_state_0.body_f = wp.empty_like(self.state_0.body_f)
 
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+
+        self.contacts = self.model.contacts()
 
         # viewer
         self.viewer.set_model(self.model)
@@ -178,7 +166,7 @@ class Example:
         self.collect_collider_impulses()
 
         # map from collider index to body index
-        self.collider_body_id = mpm_model.collider.collider_body_index
+        self.collider_body_id = self.mpm_solver.collider_body_index
 
         # per-body forces and torques applied by sand to rigid bodies
         self.body_sand_forces = wp.zeros_like(self.state_0.body_f)
@@ -221,7 +209,7 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            self.contacts = self.model.collide(self.state_0)
+            self.model.collide(self.state_0, self.contacts)
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
             # swap states
@@ -278,7 +266,7 @@ class Example:
             "all bodies are above the sand",
             lambda q, qd: q[2] > 0.45,
         )
-        voxel_size = self.mpm_solver.mpm_model.voxel_size
+        voxel_size = self.mpm_solver.voxel_size
         newton.examples.test_particle_state(
             self.sand_state_0,
             "all particles are above the ground",
@@ -390,6 +378,7 @@ class Example:
             mass=mass,
             jitter=2.0 * radius,
             radius_mean=radius,
+            custom_attributes={"mpm:friction": 0.75},
         )
 
 
@@ -398,6 +387,6 @@ if __name__ == "__main__":
     viewer, args = newton.examples.init()
 
     # Create example and run
-    example = Example(viewer)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

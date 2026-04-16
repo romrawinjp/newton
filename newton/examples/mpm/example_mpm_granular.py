@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import numpy as np
 import warp as wp
@@ -22,23 +10,27 @@ from newton.solvers import SolverImplicitMPM
 
 
 class Example:
-    def __init__(self, viewer, options):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
-        self.fps = options.fps
+        self.fps = args.fps
         self.frame_dt = 1.0 / self.fps
 
         # group related attributes by prefix
         self.sim_time = 0.0
-        self.sim_substeps = options.substeps
+        self.sim_substeps = args.substeps
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         # save a reference to the viewer
         self.viewer = viewer
         builder = newton.ModelBuilder()
-        Example.emit_particles(builder, options)
+
+        # Register MPM custom attributes before adding particles
+        SolverImplicitMPM.register_custom_attributes(builder)
+
+        Example.emit_particles(builder, args)
 
         # Setup collision geometry
-        self.collider = options.collider
+        self.collider = args.collider
         if self.collider == "concave":
             extents = (1.0, 2.0, 0.25)
             left_xform = wp.transform(
@@ -65,12 +57,13 @@ class Example:
                 hz=extents[2],
             )
         elif self.collider != "none":
-            extents = (0.5, 2.0, 0.8)
             if self.collider == "cube":
+                extents = (0.5, 2.0, 0.8)
                 xform = wp.transform(wp.vec3(0.75, 0.0, 0.8), wp.quat_identity())
             elif self.collider == "wedge":
+                extents = (0.5, 2.0, 0.5)
                 xform = wp.transform(
-                    wp.vec3(0.0, 0.0, 0.9), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 4.0)
+                    wp.vec3(0.1, 0.0, 0.5), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), np.pi / 4.0)
                 )
 
             builder.add_shape_box(
@@ -85,32 +78,22 @@ class Example:
         builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.5))
 
         self.model = builder.finalize()
-        self.model.particle_mu = options.friction_coeff
-        self.model.set_gravity(options.gravity)
+        self.model.set_gravity(args.gravity)
 
-        # Disable model's particle material parameters,
-        # we want to read directly from MPM options instead
-        self.model.particle_ke = None
-        self.model.particle_kd = None
-        self.model.particle_cohesion = None
-        self.model.particle_adhesion = None
-
-        # Copy all remaining CLI arguments to MPM options
-        mpm_options = SolverImplicitMPM.Options()
-        for key in vars(options):
+        # Copy all remaining CLI arguments to MPM options or per-particle material custom attributes
+        mpm_options = SolverImplicitMPM.Config()
+        for key in vars(args):
             if hasattr(mpm_options, key):
-                setattr(mpm_options, key, getattr(options, key))
+                setattr(mpm_options, key, getattr(args, key))
 
-        # Create MPM model from Newton model
-        mpm_model = SolverImplicitMPM.Model(self.model, mpm_options)
+            if hasattr(self.model.mpm, key):
+                getattr(self.model.mpm, key).fill_(getattr(args, key))
+
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
 
-        # Initialize MPM solver and add supplemental state variables
-        self.solver = SolverImplicitMPM(mpm_model, mpm_options)
-
-        self.solver.enrich_state(self.state_0)
-        self.solver.enrich_state(self.state_1)
+        # Initialize MPM solver
+        self.solver = SolverImplicitMPM(self.model, mpm_options)
 
         self.viewer.set_model(self.model)
 
@@ -119,6 +102,7 @@ class Example:
 
         self.viewer.show_particles = True
         self.show_normals = False
+        self.show_stress = False
 
         self.capture()
 
@@ -146,7 +130,7 @@ class Example:
         self.sim_time += self.frame_dt
 
     def test_final(self):
-        voxel_size = self.solver.mpm_model.voxel_size
+        voxel_size = self.solver.voxel_size
         newton.examples.test_particle_state(
             self.state_0,
             "all particles are above the ground",
@@ -154,14 +138,14 @@ class Example:
         )
 
         if self.collider == "cube":
-            cube_extents = wp.vec3(0.5, 2.0, 0.6) * 0.9
-            cube_center = wp.vec3(0.75, 0, 0.9)
+            cube_extents = wp.vec3(0.5, 2.0, 0.8) - wp.vec3(voxel_size)
+            cube_center = wp.vec3(0.75, 0, 0.8)
             cube_lower = cube_center - cube_extents
             cube_upper = cube_center + cube_extents
             newton.examples.test_particle_state(
                 self.state_0,
                 "all particles are outside the cube",
-                lambda q, qd: not newton.utils.vec_inside_limits(q, cube_lower, cube_upper),
+                lambda q, qd: not newton.math.vec_inside_limits(q, cube_lower, cube_upper),
             )
 
         # Test that some particles are still high-enough
@@ -178,7 +162,7 @@ class Example:
             _impulses, pos, _cid = self.solver.collect_collider_impulses(self.state_0)
             normals = self.state_0.collider_normal_field.dof_values
 
-            normal_vecs = 0.25 * self.solver.mpm_model.voxel_size * normals
+            normal_vecs = 0.25 * self.solver.voxel_size * normals
             root = pos
             mid = pos + normal_vecs
             tip = mid + normal_vecs
@@ -239,45 +223,59 @@ class Example:
             radius_mean=radius,
         )
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+
+        # Scene configuration
+        parser.add_argument("--collider", default="cube", choices=["cube", "wedge", "concave", "none"], type=str)
+        parser.add_argument("--emit-lo", type=float, nargs=3, default=[-1, -1, 1.5])
+        parser.add_argument("--emit-hi", type=float, nargs=3, default=[1, 1, 3.5])
+        parser.add_argument("--gravity", type=float, nargs=3, default=[0, 0, -10])
+        parser.add_argument("--fps", type=float, default=60.0)
+        parser.add_argument("--substeps", type=int, default=1)
+
+        # Add MPM-specific arguments
+        parser.add_argument("--density", type=float, default=1000.0)
+        parser.add_argument("--air-drag", type=float, default=1.0)
+        parser.add_argument("--critical-fraction", "-cf", type=float, default=0.0)
+
+        parser.add_argument("--young-modulus", "-ym", type=float, default=1.0e15)
+        parser.add_argument("--poisson-ratio", "-nu", type=float, default=0.3)
+        parser.add_argument("--friction", "-mu", type=float, default=0.68)
+        parser.add_argument("--damping", type=float, default=0.0)
+        parser.add_argument("--yield-pressure", "-yp", type=float, default=1.0e12)
+        parser.add_argument("--tensile-yield-ratio", "-tyr", type=float, default=0.0)
+        parser.add_argument("--yield-stress", "-ys", type=float, default=0.0)
+        parser.add_argument("--hardening", type=float, default=0.0)
+        parser.add_argument("--dilatancy", type=float, default=0.0)
+        parser.add_argument("--viscosity", type=float, default=0.0)
+
+        parser.add_argument("--grid-type", "-gt", type=str, default="sparse", choices=["sparse", "fixed", "dense"])
+        parser.add_argument("--grid-padding", "-gp", type=int, default=0)
+        parser.add_argument("--max-active-cell-count", "-mac", type=int, default=-1)
+        parser.add_argument(
+            "--solver",
+            "-s",
+            type=str,
+            default="gauss-seidel",
+            choices=["gauss-seidel", "jacobi", "cg", "cg+jacobi", "cg+gauss-seidel"],
+        )
+        parser.add_argument("--transfer-scheme", "-ts", type=str, default="apic", choices=["apic", "pic"])
+        parser.add_argument("--integration-scheme", "-is", type=str, default="pic", choices=["pic", "gimp"])
+
+        parser.add_argument("--strain-basis", "-sb", type=str, default="P0")
+        parser.add_argument("--collider-basis", "-cb", type=str, default="Q1")
+        parser.add_argument("--velocity-basis", "-vb", type=str, default="Q1")
+
+        parser.add_argument("--max-iterations", "-it", type=int, default=250)
+        parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-4)
+        parser.add_argument("--voxel-size", "-dx", type=float, default=0.1)
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
-
-    # Scene configuration
-    parser.add_argument("--collider", default="cube", choices=["cube", "wedge", "concave", "none"], type=str)
-    parser.add_argument("--emit-lo", type=float, nargs=3, default=[-1, -1, 1.5])
-    parser.add_argument("--emit-hi", type=float, nargs=3, default=[1, 1, 3.5])
-    parser.add_argument("--gravity", type=float, nargs=3, default=[0, 0, -10])
-    parser.add_argument("--fps", type=float, default=60.0)
-    parser.add_argument("--substeps", type=int, default=1)
-
-    # Add MPM-specific arguments
-    parser.add_argument("--density", type=float, default=1000.0)
-    parser.add_argument("--air-drag", type=float, default=1.0)
-    parser.add_argument("--critical-fraction", "-cf", type=float, default=0.0)
-
-    parser.add_argument("--young-modulus", "-ym", type=float, default=1.0e15)
-    parser.add_argument("--poisson-ratio", "-nu", type=float, default=0.3)
-    parser.add_argument("--friction-coeff", "-mu", type=float, default=0.68)
-    parser.add_argument("--damping", type=float, default=0.0)
-    parser.add_argument("--yield-pressure", "-yp", type=float, default=1.0e12)
-    parser.add_argument("--tensile-yield-ratio", "-tyr", type=float, default=0.0)
-    parser.add_argument("--yield-stress", "-ys", type=float, default=0.0)
-    parser.add_argument("--hardening", type=float, default=0.0)
-
-    parser.add_argument("--grid-type", "-gt", type=str, default="sparse", choices=["sparse", "fixed", "dense"])
-    parser.add_argument("--grid-padding", "-gp", type=int, default=0)
-    parser.add_argument("--max-active-cell-count", "-mac", type=int, default=-1)
-    parser.add_argument("--solver", "-s", type=str, default="gauss-seidel", choices=["gauss-seidel", "jacobi"])
-    parser.add_argument("--transfer-scheme", "-ts", type=str, default="apic", choices=["apic", "pic"])
-
-    parser.add_argument("--strain-basis", "-sb", type=str, default="P0", choices=["P0", "Q1"])
-    parser.add_argument("--collider-basis", "-cb", type=str, default="Q1")
-
-    parser.add_argument("--max-iterations", "-it", type=int, default=250)
-    parser.add_argument("--tolerance", "-tol", type=float, default=1.0e-6)
-    parser.add_argument("--voxel-size", "-dx", type=float, default=0.1)
+    parser = Example.create_parser()
 
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init(parser)

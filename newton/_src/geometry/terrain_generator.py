@@ -1,18 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 
 """Compact procedural terrain generator for Newton physics examples.
 
@@ -443,8 +430,7 @@ def _heightfield_terrain(
     if center_y is None:
         center_y = size[1] / 2
 
-    # Use heightfield_to_mesh to convert heightfield to mesh
-    vertices, indices = heightfield_to_mesh(
+    vertices, indices = create_mesh_heightfield(
         heightfield=heightfield,
         extent_x=size[0],
         extent_y=size[1],
@@ -456,7 +442,7 @@ def _heightfield_terrain(
     return vertices, indices
 
 
-def generate_terrain_grid(
+def create_mesh_terrain(
     grid_size: tuple[int, int] = (4, 4),
     block_size: tuple[float, float] = (5.0, 5.0),
     terrain_types: list[str] | str | object | None = None,
@@ -602,7 +588,7 @@ def _to_newton_mesh(vertices: np.ndarray, indices: np.ndarray) -> tuple[np.ndarr
     return vertices.astype(np.float32), indices.astype(np.int32)
 
 
-def heightfield_to_mesh(
+def create_mesh_heightfield(
     heightfield: np.ndarray,
     extent_x: float,
     extent_y: float,

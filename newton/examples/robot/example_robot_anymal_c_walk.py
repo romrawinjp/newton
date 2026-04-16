@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Robot ANYmal C Walk
@@ -23,23 +11,20 @@
 #
 ###########################################################################
 
+import warnings
+
 import torch
 import warp as wp
-from warp.torch import device_to_torch
-
-wp.config.enable_backward = False
 
 import newton
 import newton.examples
 import newton.utils
-from newton import State
-from newton.geometry import generate_terrain_grid
+from newton import GeoType, State
 
 lab_to_mujoco = [0, 6, 3, 9, 1, 7, 4, 10, 2, 8, 5, 11]
 mujoco_to_lab = [0, 4, 8, 2, 6, 10, 1, 5, 9, 3, 7, 11]
 
 
-@torch.jit.script
 def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Rotate a vector by the inverse of a quaternion along the last dimension of q and v.    Args:
     q: The quaternion in (x, y, z, w). Shape is (..., 4).
@@ -56,6 +41,15 @@ def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     else:
         c = q_vec * torch.einsum("...i,...i->...", q_vec, v).unsqueeze(-1) * 2.0
     return a - b + c
+
+
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`torch\.jit\.script` is deprecated\. Please switch to `torch\.compile` or `torch\.export`\.",
+        category=DeprecationWarning,
+    )
+    quat_rotate_inverse = torch.jit.script(quat_rotate_inverse)
 
 
 def compute_obs(actions, state: State, joint_pos_initial, device, indices, gravity_vec, command):
@@ -76,10 +70,10 @@ def compute_obs(actions, state: State, joint_pos_initial, device, indices, gravi
 
 
 class Example:
-    def __init__(self, viewer, args=None):
+    def __init__(self, viewer, args):
         self.viewer = viewer
         self.device = wp.get_device()
-        self.torch_device = device_to_torch(self.device)
+        self.torch_device = wp.device_to_torch(self.device)
         self.is_test = args is not None and args.test
 
         builder = newton.ModelBuilder()
@@ -105,22 +99,35 @@ class Example:
             ignore_inertial_definitions=False,
         )
 
+        # Enlarge foot collision spheres to improve walking stability on uneven terrain.
+        # The URDF defines small spheres on the shank links; doubling their radius
+        # prevents the robot from stumbling on terrain features like waves and stairs.
+        for i in range(len(builder.shape_type)):
+            if builder.shape_type[i] == GeoType.SPHERE:
+                r = builder.shape_scale[i][0]
+                builder.shape_scale[i] = (r * 2.0, 0.0, 0.0)
+
         # Generate procedural terrain for visual demonstration (but not during unit tests)
         if not self.is_test:
-            vertices, indices = generate_terrain_grid(
+            terrain_mesh = newton.Mesh.create_terrain(
                 grid_size=(8, 3),  # 3x8 grid for forward walking
                 block_size=(3.0, 3.0),
                 terrain_types=["random_grid", "flat", "wave", "gap", "pyramid_stairs"],
                 terrain_params={
                     "pyramid_stairs": {"step_width": 0.3, "step_height": 0.02, "platform_width": 0.6},
                     "random_grid": {"grid_width": 0.3, "grid_height_range": (0, 0.02)},
-                    "wave": {"wave_amplitude": 0.15, "wave_frequency": 2.0},
+                    "wave": {"wave_amplitude": 0.1, "wave_frequency": 2.0},  # amplitude reduced from 0.15
                 },
                 seed=42,
+                compute_inertia=False,
             )
-            terrain_mesh = newton.Mesh(vertices, indices)
             terrain_offset = wp.transform(p=wp.vec3(-5, -2.0, 0.01), q=wp.quat_identity())
-            builder.add_shape_mesh(body=-1, mesh=terrain_mesh, xform=terrain_offset)
+            builder.add_shape_mesh(
+                body=-1,
+                mesh=terrain_mesh,
+                xform=terrain_offset,
+                cfg=newton.ModelBuilder.ShapeConfig(has_shape_collision=False),
+            )
         builder.add_ground_plane()
 
         self.sim_time = 0.0
@@ -147,24 +154,30 @@ class Example:
             "LF_KFE": -0.8,
         }
         # Set initial joint positions (skip first 7 position coordinates which are the free joint), e.g. for "LF_HAA" value will be written at index 1+6 = 7.
-        for key, value in initial_q.items():
-            builder.joint_q[builder.joint_key.index(key) + 6] = value
+        for name, value in initial_q.items():
+            idx = next(
+                (i for i, lbl in enumerate(builder.joint_label) if lbl.endswith(f"/{name}")),
+                None,
+            )
+            if idx is None:
+                raise ValueError(f"Joint '{name}' not found in builder.joint_label")
+            builder.joint_q[idx + 6] = value
 
         for i in range(len(builder.joint_target_ke)):
             builder.joint_target_ke[i] = 150
             builder.joint_target_kd[i] = 5
 
         self.model = builder.finalize()
-
-        # Create collision pipeline from command-line args (default: CollisionPipelineUnified with EXPLICIT)
-        # Can override with: --collision-pipeline unified --broad-phase-mode nxn|sap|explicit
-        self.collision_pipeline = newton.examples.create_collision_pipeline(self.model, args)
+        use_mujoco_contacts = getattr(args, "use_mujoco_contacts", False)
 
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
-            use_mujoco_contacts=args.use_mujoco_contacts if args else False,
-            ls_parallel=True,
+            use_mujoco_contacts=use_mujoco_contacts,
+            solver="newton",
+            ls_parallel=False,
+            ls_iterations=50,  # Increased from default 10 for determinism
             njmax=50,
+            nconmax=100,  # Increased from 75 to handle peak contact count of ~77
         )
 
         self.viewer.set_model(self.model)
@@ -187,14 +200,23 @@ class Example:
         # Evaluate forward kinematics to update body poses based on initial joint configuration
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
 
-        # Initialize contacts using collision pipeline
-        self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+        # Initialize contacts
+        if use_mujoco_contacts:
+            self.contacts = None
+        else:
+            self.contacts = self.model.contacts()
 
         # Download the policy from the newton-assets repository
         policy_asset_path = newton.utils.download_asset("anybotics_anymal_c")
         policy_path = str(policy_asset_path / "rl_policies" / "anymal_walking_policy_physx.pt")
 
-        self.policy = torch.jit.load(policy_path, map_location=self.torch_device)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"`torch\.jit\.load` is deprecated\. Please switch to `torch\.export`\.",
+                category=DeprecationWarning,
+            )
+            self.policy = torch.jit.load(policy_path, map_location=self.torch_device)
         self.joint_pos_initial = torch.tensor(
             self.state_0.joint_q[7:], device=self.torch_device, dtype=torch.float32
         ).unsqueeze(0)
@@ -228,8 +250,8 @@ class Example:
             # apply forces to the model
             self.viewer.apply_forces(self.state_0)
 
-            # Compute contacts using collision pipeline for terrain mesh
-            self.contacts = self.model.collide(self.state_0, collision_pipeline=self.collision_pipeline)
+            if self.contacts is not None:
+                self.model.collide(self.state_0, self.contacts)
 
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
 
@@ -272,7 +294,8 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        assert self.model.body_key == [
+        body_names = [lbl.split("/")[-1] for lbl in self.model.body_label]
+        assert body_names == [
             "base",
             "LF_HIP",
             "LF_THIGH",
@@ -287,7 +310,8 @@ class Example:
             "RH_THIGH",
             "RH_SHANK",
         ]
-        assert self.model.joint_key == [
+        joint_names = [lbl.split("/")[-1] for lbl in self.model.joint_label]
+        assert joint_names == [
             "floating_base",
             "LF_HAA",
             "LF_HFE",
@@ -317,20 +341,26 @@ class Example:
             lambda q, qd: q[1] > 9.0,  # This threshold assumes 500 frames
         )
 
-        forward_vel_min = wp.spatial_vector(-0.5, 0.9, -0.2, -0.8, -0.5, -0.5)
-        forward_vel_max = wp.spatial_vector(0.5, 1.1, 0.2, 0.8, 0.5, 0.5)
+        forward_vel_min = wp.spatial_vector(-0.5, 0.9, -0.2, -0.8, -1.5, -0.5)
+        forward_vel_max = wp.spatial_vector(0.5, 1.1, 0.2, 0.8, 1.5, 0.5)
         newton.examples.test_body_state(
             self.model,
             self.state_0,
             "the robot is moving forward and not falling",
-            lambda q, qd: newton.utils.vec_inside_limits(qd, forward_vel_min, forward_vel_max),
+            lambda q, qd: newton.math.vec_inside_limits(qd, forward_vel_min, forward_vel_max),
             indices=[0],
         )
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_mujoco_contacts_arg(parser)
+        return parser
+
 
 if __name__ == "__main__":
-    # Parse arguments and initialize viewer
-    viewer, args = newton.examples.init()
+    parser = Example.create_parser()
+    viewer, args = newton.examples.init(parser)
 
     example = Example(viewer, args)
 

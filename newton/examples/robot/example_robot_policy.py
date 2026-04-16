@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Robot control via keyboard
@@ -30,6 +18,7 @@
 # to run the example with a PhysX-trained policy run with --physx
 ###########################################################################
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,14 +27,9 @@ import warp as wp
 import yaml
 
 import newton
-
-# Test: Disable CUDA-OpenGL interop to see if that fixes the issue
-import newton._src.viewer.gl.opengl as opengl_module
 import newton.examples
 import newton.utils
-from newton import State
-
-opengl_module.ENABLE_CUDA_INTEROP = False
+from newton import JointTargetMode, State
 
 
 @dataclass
@@ -87,7 +71,6 @@ ROBOT_CONFIGS = {
 }
 
 
-@torch.jit.script
 def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Rotate a vector by the inverse of a quaternion.
 
@@ -108,6 +91,15 @@ def quat_rotate_inverse(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     else:
         c = q_vec * torch.einsum("...i,...i->...", q_vec, v).unsqueeze(-1) * 2.0
     return a - b + c
+
+
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`torch\.jit\.script` is deprecated\. Please switch to `torch\.compile` or `torch\.export`\.",
+        category=DeprecationWarning,
+    )
+    quat_rotate_inverse = torch.jit.script(quat_rotate_inverse)
 
 
 def compute_obs(
@@ -166,7 +158,13 @@ def load_policy_and_setup_tensors(example: Any, policy_path: str, num_dofs: int,
     """
     device = example.torch_device
     print("[INFO] Loading policy from:", policy_path)
-    example.policy = torch.jit.load(policy_path, map_location=device)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`torch\.jit\.load` is deprecated\. Please switch to `torch\.export`\.",
+            category=DeprecationWarning,
+        )
+        example.policy = torch.jit.load(policy_path, map_location=device)
 
     # Handle potential None state
     joint_q = example.state_0.joint_q if example.state_0.joint_q is not None else []
@@ -262,6 +260,7 @@ class Example:
             builder.joint_target_ke[i + 6] = config["mjw_joint_stiffness"][i]
             builder.joint_target_kd[i + 6] = config["mjw_joint_damping"][i]
             builder.joint_armature[i + 6] = config["mjw_joint_armature"][i]
+            builder.joint_target_mode[i + 6] = int(JointTargetMode.POSITION)
 
         self.model = builder.finalize()
         self.model.set_gravity((0.0, 0.0, -9.81))
@@ -279,7 +278,7 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+        self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
 
         # Set model in viewer
         self.viewer.set_model(self.model)
@@ -324,8 +323,6 @@ class Example:
 
     def simulate(self):
         """Simulate performs one frame's worth of updates."""
-        self.contacts = self.model.collide(self.state_0)
-
         need_state_copy = self.use_cuda_graph and self.sim_substeps % 2 == 1
 
         for i in range(self.sim_substeps):
@@ -334,7 +331,7 @@ class Example:
             # Apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
 
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
 
             # Swap states - handle CUDA graph case specially
             if need_state_copy and i == self.sim_substeps - 1:
@@ -343,6 +340,8 @@ class Example:
             else:
                 # We can just swap the state references
                 self.state_0, self.state_1 = self.state_1, self.state_0
+
+        self.solver.update_contacts(self.contacts, self.state_0)
 
     def reset(self):
         print("[INFO] Resetting example")
@@ -454,7 +453,10 @@ if __name__ == "__main__":
 
     if args.physx:
         if "physx" not in robot_config.policy_path or "physx_joint_names" not in config:
-            raise ValueError(f"PhysX policy/joint mapping not available for robot '{args.robot}'.")
+            physx_robots = [name for name, cfg in ROBOT_CONFIGS.items() if "physx" in cfg.policy_path]
+            print(f"[ERROR] PhysX policy not available for robot '{args.robot}'.")
+            print(f"[INFO] Robots with PhysX support: {physx_robots}")
+            exit(1)
         policy_path = f"{asset_directory}/{robot_config.policy_path['physx']}"
         mjc_to_physx, physx_to_mjc = find_physx_mjwarp_mapping(config["mjw_joint_names"], config["physx_joint_names"])
     else:

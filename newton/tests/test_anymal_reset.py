@@ -1,24 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """Tests that reset results in the same data and converge of solver is preserved."""
 
 import copy
 import unittest
 
-import mujoco
 import numpy as np
 import warp as wp
 
@@ -31,7 +18,7 @@ from newton.tests.unittest_utils import add_function_test, get_test_devices
 class TestAnymalReset(unittest.TestCase):
     def setUp(self):
         self.device = wp.get_device()
-        self.num_worlds = 1
+        self.world_count = 1
         self.headless = True
 
     def _setup_simulation(self, cone_type):
@@ -72,7 +59,7 @@ class TestAnymalReset(unittest.TestCase):
 
         self.model = builder.finalize()
 
-        if cone_type == mujoco.mjtCone.mjCONE_PYRAMIDAL:
+        if cone_type == "pyramidal":
             impratio = 1.0
         else:
             impratio = 100.0
@@ -111,12 +98,7 @@ class TestAnymalReset(unittest.TestCase):
             self.graph = None
 
     def _cone_type_name(self, cone_type):
-        if cone_type == mujoco.mjtCone.mjCONE_ELLIPTIC:
-            return "ELLIPTIC"
-        elif cone_type == mujoco.mjtCone.mjCONE_PYRAMIDAL:
-            return "PYRAMIDAL"
-        else:
-            return f"UNKNOWN({cone_type})"
+        return cone_type.upper()
 
     def simulate(self):
         self.contacts = None
@@ -318,7 +300,7 @@ add_function_test(
     "test_reset_functionality_elliptic",
     test_reset_functionality,
     devices=devices,
-    cone_type=mujoco.mjtCone.mjCONE_ELLIPTIC,
+    cone_type="elliptic",
     check_output=False,
 )
 add_function_test(
@@ -326,7 +308,7 @@ add_function_test(
     "test_reset_functionality_pyramidal",
     test_reset_functionality,
     devices=devices,
-    cone_type=mujoco.mjtCone.mjCONE_PYRAMIDAL,
+    cone_type="pyramidal",
     check_output=False,
 )
 

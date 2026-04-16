@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Diffsim Bear
@@ -49,7 +37,7 @@ DEFAULT_BEAR_PATH = os.path.join(newton.examples.get_asset_directory(), "bear.us
 
 
 @wp.kernel
-def loss_kernel(com: wp.array(dtype=wp.vec3), loss: wp.array(dtype=float)):
+def loss_kernel(com: wp.array[wp.vec3], loss: wp.array[float]):
     tid = wp.tid()
     vx = com[tid][0]
     vy = com[tid][1]
@@ -60,7 +48,7 @@ def loss_kernel(com: wp.array(dtype=wp.vec3), loss: wp.array(dtype=float)):
 
 
 @wp.kernel
-def com_kernel(velocities: wp.array(dtype=wp.vec3), n: int, com: wp.array(dtype=wp.vec3)):
+def com_kernel(velocities: wp.array[wp.vec3], n: int, com: wp.array[wp.vec3]):
     tid = wp.tid()
     v = velocities[tid]
     a = v / wp.float32(n)
@@ -68,7 +56,7 @@ def com_kernel(velocities: wp.array(dtype=wp.vec3), n: int, com: wp.array(dtype=
 
 
 @wp.kernel
-def compute_phases(phases: wp.array(dtype=float), sim_time: float):
+def compute_phases(phases: wp.array[float], sim_time: float):
     tid = wp.tid()
     phases[tid] = wp.sin(PHASE_FREQ * sim_time + wp.float32(tid) * PHASE_STEP)
 
@@ -79,9 +67,7 @@ def tanh(x: float):
 
 
 @wp.kernel
-def network(
-    phases: wp.array2d(dtype=float), weights: wp.array2d(dtype=float), tet_activations: wp.array2d(dtype=float)
-):
+def network(phases: wp.array2d[float], weights: wp.array2d[float], tet_activations: wp.array2d[float]):
     # output tile index
     i = wp.tid()
 
@@ -96,19 +82,19 @@ def network(
 
 
 class Example:
-    def __init__(self, viewer, verbose=False, sim_steps=300):
+    def __init__(self, viewer, args):
         # setup simulation parameters first
         fps = 60
         self.frame = 0
         self.frame_dt = 1.0 / fps
 
-        self.sim_steps = sim_steps
+        self.sim_steps = args.sim_steps
         self.sim_substeps = 80
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
 
         self.phase_count = PHASE_COUNT
-        self.verbose = verbose
+        self.verbose = args.verbose
 
         # setup training parameters
         self.train_iter = 0
@@ -171,7 +157,15 @@ class Example:
 
         # initialize control and one-shot contacts (valid for simple collisions against constant plane)
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.states[0], soft_contact_margin=10.0)
+        # Create collision pipeline with soft contact margin (requires_grad for differentiable simulation)
+        self.collision_pipeline = newton.CollisionPipeline(
+            self.model,
+            broad_phase="explicit",
+            soft_contact_margin=10.0,
+            requires_grad=True,
+        )
+        self.contacts = self.collision_pipeline.contacts()
+        self.collision_pipeline.collide(self.states[0], self.contacts)
 
         # initialize the solver.
         self.solver = newton.solvers.SolverSemiImplicit(self.model, enable_tri_contact=False)
@@ -181,16 +175,19 @@ class Example:
         for _i in range(self.sim_steps):
             self.phases.append(wp.zeros(self.phase_count, dtype=float, requires_grad=True))
 
+        # Pad tet count to multiple of TILE_TETS for safe tiled kernel access
+        self.padded_tet_count = math.ceil(self.model.tet_count / TILE_TETS) * TILE_TETS
+
         # weights matrix for linear network
         rng = np.random.default_rng(42)
         k = 1.0 / self.phase_count
-        weights = rng.uniform(-np.sqrt(k), np.sqrt(k), (self.model.tet_count, self.phase_count))
+        weights = rng.uniform(-np.sqrt(k), np.sqrt(k), (self.padded_tet_count, self.phase_count))
         self.weights = wp.array(weights, dtype=float, requires_grad=True)
 
         # tanh activation layer array
         self.tet_activations = []
         for _i in range(self.sim_steps):
-            self.tet_activations.append(wp.zeros(self.model.tet_count, dtype=float, requires_grad=True))
+            self.tet_activations.append(wp.zeros(self.padded_tet_count, dtype=float, requires_grad=True))
 
         # optimization
         self.loss = wp.zeros(1, dtype=float, requires_grad=True)
@@ -229,12 +226,12 @@ class Example:
         # apply linear network with tanh activation
         wp.launch_tiled(
             kernel=network,
-            dim=math.ceil(self.model.tet_count / TILE_TETS),
+            dim=self.padded_tet_count // TILE_TETS,
             inputs=[self.phases[frame].reshape((self.phase_count, 1)), self.weights],
-            outputs=[self.tet_activations[frame].reshape((self.model.tet_count, 1))],
+            outputs=[self.tet_activations[frame].reshape((self.padded_tet_count, 1))],
             block_dim=TILE_THREADS,
         )
-        self.control.tet_activations = self.tet_activations[frame]
+        self.control.tet_activations = self.tet_activations[frame][: self.model.tet_count]
 
         # run simulation loop
         for i in range(self.sim_substeps):
@@ -292,6 +289,11 @@ class Example:
         self.train_iter += 1
 
     def render(self):
+        if self.viewer.is_paused():
+            self.viewer.begin_frame(self.viewer.time)
+            self.viewer.end_frame()
+            return
+
         # draw training run
         for i in range(self.sim_steps + 1):
             state = self.states[i * self.sim_substeps]
@@ -305,20 +307,21 @@ class Example:
     def test_final(self):
         assert most(np.diff(self.loss_history) < -0.0, min_ratio=0.8)
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--verbose", action="store_true", help="Print out additional status messages during execution."
+        )
+        parser.add_argument(
+            "--sim-steps", type=int, default=300, help="Number of simulation steps to execute in a training run."
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    # Create parser that inherits common arguments and adds example-specific ones
-    parser = newton.examples.create_parser()
-    parser.add_argument("--verbose", action="store_true", help="Print out additional status messages during execution.")
-    parser.add_argument(
-        "--sim-steps", type=int, default=300, help="Number of simulation steps to execute in a training run."
-    )
-
-    # Parse arguments and initialize viewer
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    # Create example
-    example = Example(viewer, verbose=args.verbose, sim_steps=args.sim_steps)
-
-    # Run example
+    example = Example(viewer, args)
     newton.examples.run(example, args)

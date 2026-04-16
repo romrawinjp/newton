@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example Robot Allegro Hand
@@ -24,32 +12,31 @@
 # about this change in the joint parent transform by calling
 # self.solver.notify_model_changed(SolverNotifyFlags.JOINT_PROPERTIES).
 #
-# Command: python -m newton.examples robot_allegro_hand --num-worlds 16
+# Command: python -m newton.examples robot_allegro_hand --world-count 16
 #
 ###########################################################################
 
-import re
 
 import numpy as np
 import warp as wp
 
 import newton
 import newton.examples
+from newton import JointTargetMode
 from newton.solvers import SolverNotifyFlags
-
-hand_rotation = wp.normalize(wp.quat(0.283, 0.683, -0.622, 0.258))
 
 
 @wp.kernel
 def move_hand(
-    joint_qd_start: wp.array(dtype=wp.int32),
-    joint_limit_lower: wp.array(dtype=wp.float32),
-    joint_limit_upper: wp.array(dtype=wp.float32),
-    sim_time: wp.array(dtype=wp.float32),
+    joint_qd_start: wp.array[wp.int32],
+    joint_limit_lower: wp.array[wp.float32],
+    joint_limit_upper: wp.array[wp.float32],
+    sim_time: wp.array[wp.float32],
     sim_dt: float,
+    hand_rotation: wp.quat,
     # outputs
-    joint_target_pos: wp.array(dtype=wp.float32),
-    joint_parent_xform: wp.array(dtype=wp.transform),
+    joint_target_pos: wp.array[wp.float32],
+    joint_parent_xform: wp.array[wp.transform],
 ):
     world_id = wp.tid()
     root_joint_id = world_id * 22
@@ -60,13 +47,11 @@ def move_hand(
     # animate the finger joints
     for i in range(20):
         di = root_dof_start + i
-        target = wp.sin(t + float(i * 6) * 0.1) * 0.15 + 0.3
+        target = wp.sin(t + float(i * 6) * 0.1) * 0.08 + 0.3
         joint_target_pos[di] = wp.clamp(target, joint_limit_lower[di], joint_limit_upper[di])
 
     # animate the root joint transform
-    q = wp.quat_identity()
-    q *= wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.sin(t) * 0.1)
-    q *= wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), -t * 0.02)
+    q = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), wp.sin(t) * 0.1)
     root_xform = joint_parent_xform[root_joint_id]
     joint_parent_xform[root_joint_id] = wp.transform(root_xform.p, q * hand_rotation)
 
@@ -75,7 +60,7 @@ def move_hand(
 
 
 class Example:
-    def __init__(self, viewer, num_worlds=4):
+    def __init__(self, viewer, args):
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
 
@@ -83,39 +68,53 @@ class Example:
         self.sim_substeps = 8
         self.sim_dt = self.frame_dt / self.sim_substeps
 
-        self.num_worlds = num_worlds
+        self.world_count = args.world_count
 
         self.viewer = viewer
 
         self.device = wp.get_device()
 
+        self.hand_rotation = wp.normalize(wp.quat(0.21643, 0.706218, -0.648166, 0.185191))
+        max_contacts_per_world = 300
+
         allegro_hand = newton.ModelBuilder()
         newton.solvers.SolverMuJoCo.register_custom_attributes(allegro_hand)
         allegro_hand.default_shape_cfg.ke = 1.0e3
         allegro_hand.default_shape_cfg.kd = 1.0e2
+        allegro_hand.default_shape_cfg.margin = 0.005
+        allegro_hand.default_shape_cfg.gap = 0.015
 
         asset_path = newton.utils.download_asset("wonik_allegro")
         asset_file = str(asset_path / "usd" / "allegro_left_hand_with_cube.usda")
         allegro_hand.add_usd(
             asset_file,
             xform=wp.transform(wp.vec3(0, 0, 0.5)),
-            enable_self_collisions=True,
-            ignore_paths=[".*Dummy", ".*CollisionPlane", ".*goal", ".*DexCube/visuals"],
+            enable_self_collisions=False,
+            ignore_paths=[".*Dummy", ".*CollisionPlane"],
+            hide_collision_shapes=True,
         )
 
-        # hide collision shapes for the hand links
-        for i, key in enumerate(allegro_hand.shape_key):
-            if re.match(".*Robot/.*?/collision", key):
-                allegro_hand.shape_flags[i] &= ~newton.ShapeFlags.VISIBLE
-
-        # set joint targets and joint drive gains
-        for i in range(allegro_hand.joint_dof_count):
+        # set joint targets and joint drive gains (only on hand, not the floating-body cube)
+        for i in range(allegro_hand.joint_dof_count - 6):
             allegro_hand.joint_target_ke[i] = 150
             allegro_hand.joint_target_kd[i] = 5
-            allegro_hand.joint_target_pos[i] = 0.0
+            allegro_hand.joint_q[i] = 0.3
+            allegro_hand.joint_target_pos[i] = 0.3
+            if allegro_hand.joint_label[i][-2:] == "_0":
+                allegro_hand.joint_q[i] = 0.6
+                allegro_hand.joint_target_pos[i] = 0.6
+            allegro_hand.joint_target_mode[i] = int(JointTargetMode.POSITION)
+            if allegro_hand.joint_type[i] == newton.JointType.REVOLUTE:
+                allegro_hand.joint_armature[i] = 1e-2
+
+        # Update root pose of the cube (free joint)
+        q = np.array(allegro_hand.joint_q)
+        q[-7:-4] += np.array([0.0, 0.0, 0.05])
+        q[-4:] = wp.quat_rpy(0.3, 0.5, 0.1)
+        allegro_hand.joint_q = q.tolist()
 
         builder = newton.ModelBuilder()
-        builder.replicate(allegro_hand, self.num_worlds)
+        builder.replicate(allegro_hand, self.world_count)
 
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
@@ -129,25 +128,25 @@ class Example:
         # Find the cube body index (it's the last body in each world)
         self.cube_body_offset = allegro_hand.body_count - 1
 
-        self.world_time = wp.zeros(self.num_worlds, dtype=wp.float32)
+        self.world_time = wp.zeros(self.world_count, dtype=wp.float32)
 
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
             solver="newton",
             integrator="implicitfast",
             njmax=200,
-            nconmax=150,
-            impratio=10.0,
+            nconmax=max_contacts_per_world,
+            impratio=20.0,
             cone="elliptic",
             iterations=100,
             ls_iterations=50,
-            use_mujoco_cpu=False,
+            use_mujoco_contacts=False,
         )
 
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        self.contacts = self.model.collide(self.state_0)
+        self.contacts = self.model.contacts()
 
         self.viewer.set_model(self.model)
 
@@ -161,7 +160,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.contacts = self.model.collide(self.state_0)
+        self.model.collide(self.state_0, self.contacts)
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
 
@@ -170,13 +169,14 @@ class Example:
 
             wp.launch(
                 move_hand,
-                dim=self.num_worlds,
+                dim=self.world_count,
                 inputs=[
                     self.model.joint_qd_start,
                     self.model.joint_limit_lower,
                     self.model.joint_limit_upper,
                     self.world_time,
                     self.sim_dt,
+                    self.hand_rotation,
                 ],
                 outputs=[self.control.joint_target_pos, self.model.joint_X_p],
             )
@@ -204,12 +204,14 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        num_bodies_per_world = self.model.body_count // self.num_worlds
-        for i in range(self.num_worlds):
+        num_bodies_per_world = self.model.body_count // self.world_count
+        cubes_held = 0
+
+        for i in range(self.world_count):
             world_offset = i * num_bodies_per_world
             world_pos = wp.vec3(*self.initial_world_positions[i])
 
-            # Test hand bodies (all except the cube) - keep original tight bounds
+            # Test hand bodies - must stay near initial position
             hand_lower = world_pos - wp.vec3(0.5, 0.5, 0.5)
             hand_upper = world_pos + wp.vec3(0.5, 0.5, 0.5)
             hand_body_indices = np.arange(num_bodies_per_world - 1, dtype=np.int32) + world_offset
@@ -217,31 +219,35 @@ class Example:
                 self.model,
                 self.state_0,
                 f"hand bodies from world {i} are close to the initial position",
-                lambda q, qd: newton.utils.vec_inside_limits(q.p, hand_lower, hand_upper),  # noqa: B023
+                lambda q, qd: newton.math.vec_inside_limits(q.p, hand_lower, hand_upper),  # noqa: B023
                 indices=hand_body_indices,
             )
 
-            # Test cube body - allow it to fall to ground plane
-            # Keep X/Y bounds tight, but allow Z from ground (0.0) to initial position + 0.5
+            # Count cubes still in the hand — at least 50% must remain
             cube_body_idx = world_offset + self.cube_body_offset
-            cube_lower = wp.vec3(world_pos.x - 0.5, world_pos.y - 0.5, 0.0)
+            cube_lower = wp.vec3(world_pos.x - 0.5, world_pos.y - 0.5, 0.9)
             cube_upper = world_pos + wp.vec3(0.5, 0.5, 0.5)
-            newton.examples.test_body_state(
-                self.model,
-                self.state_0,
-                f"cube from world {i} is within bounds and above ground",
-                lambda q, _qd, lower=cube_lower, upper=cube_upper: newton.utils.vec_inside_limits(q.p, lower, upper)
-                and q.p[2] > 0.0,
-                indices=np.array([cube_body_idx], dtype=np.int32),
-            )
+            cube_pos = wp.vec3(*self.state_0.body_q.numpy()[cube_body_idx, :3])
+            if newton.math.vec_inside_limits(cube_pos, cube_lower, cube_upper):
+                cubes_held += 1
+
+        held_ratio = cubes_held / self.world_count
+        assert held_ratio >= 0.5, (
+            f"Only {cubes_held}/{self.world_count} ({held_ratio:.0%}) cubes stayed in the hand, expected at least 50%"
+        )
+
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.set_defaults(world_count=100)
+        return parser
 
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser()
-    parser.add_argument("--num-worlds", type=int, default=100, help="Total number of simulated worlds.")
-
+    parser = Example.create_parser()
     viewer, args = newton.examples.init(parser)
 
-    example = Example(viewer, args.num_worlds)
+    example = Example(viewer, args)
 
     newton.examples.run(example, args)

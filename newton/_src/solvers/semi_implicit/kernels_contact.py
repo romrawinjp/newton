@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import warp as wp
 
@@ -47,10 +35,10 @@ def particle_force(n: wp.vec3, v: wp.vec3, c: float, k_n: float, k_d: float, k_f
 @wp.kernel
 def eval_particle_contact(
     grid: wp.uint64,
-    particle_x: wp.array(dtype=wp.vec3),
-    particle_v: wp.array(dtype=wp.vec3),
-    particle_radius: wp.array(dtype=float),
-    particle_flags: wp.array(dtype=wp.int32),
+    particle_x: wp.array[wp.vec3],
+    particle_v: wp.array[wp.vec3],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
     k_contact: float,
     k_damp: float,
     k_friction: float,
@@ -58,7 +46,7 @@ def eval_particle_contact(
     k_cohesion: float,
     max_radius: float,
     # outputs
-    particle_f: wp.array(dtype=wp.vec3),
+    particle_f: wp.array[wp.vec3],
 ):
     tid = wp.tid()
 
@@ -74,13 +62,11 @@ def eval_particle_contact(
     v = particle_v[i]
     radius = particle_radius[i]
 
-    f = wp.vec3()
+    f = wp.vec3(0.0)
 
     # particle contact
     query = wp.hash_grid_query(grid, x, radius + max_radius + k_cohesion)
     index = int(0)
-
-    count = int(0)
 
     while wp.hash_grid_query_next(query, index):
         if (particle_flags[index] & ParticleFlags.ACTIVE) != 0 and index != i:
@@ -89,28 +75,26 @@ def eval_particle_contact(
             d = wp.length(n)
             err = d - radius - particle_radius[index]
 
-            count += 1
-
             if err <= k_cohesion:
                 n = n / d
                 vrel = v - particle_v[index]
 
-                f = f + particle_force(n, vrel, err, k_contact, k_damp, k_friction, k_mu)
+                f += particle_force(n, vrel, err, k_contact, k_damp, k_friction, k_mu)
 
     particle_f[i] = f
 
 
 @wp.kernel
 def eval_triangle_contact(
-    # idx : wp.array(dtype=int), # list of indices for colliding particles
+    # idx : wp.array[int], # list of indices for colliding particles
     num_particles: int,  # size of particles
-    x: wp.array(dtype=wp.vec3),
-    v: wp.array(dtype=wp.vec3),
-    indices: wp.array2d(dtype=int),
-    materials: wp.array2d(dtype=float),
-    particle_radius: wp.array(dtype=float),
+    x: wp.array[wp.vec3],
+    v: wp.array[wp.vec3],
+    indices: wp.array2d[int],
+    materials: wp.array2d[float],
+    particle_radius: wp.array[float],
     contact_stiffness: float,
-    f: wp.array(dtype=wp.vec3),
+    f: wp.array[wp.vec3],
 ):
     tid = wp.tid()
     face_no = tid // num_particles  # which face
@@ -158,35 +142,35 @@ def eval_triangle_contact(
 
 @wp.kernel
 def eval_particle_body_contact(
-    particle_x: wp.array(dtype=wp.vec3),
-    particle_v: wp.array(dtype=wp.vec3),
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    particle_radius: wp.array(dtype=float),
-    particle_flags: wp.array(dtype=wp.int32),
-    body_com: wp.array(dtype=wp.vec3),
-    shape_body: wp.array(dtype=int),
-    shape_material_ke: wp.array(dtype=float),
-    shape_material_kd: wp.array(dtype=float),
-    shape_material_kf: wp.array(dtype=float),
-    shape_material_mu: wp.array(dtype=float),
-    shape_material_ka: wp.array(dtype=float),
+    particle_x: wp.array[wp.vec3],
+    particle_v: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    particle_radius: wp.array[float],
+    particle_flags: wp.array[wp.int32],
+    body_com: wp.array[wp.vec3],
+    shape_body: wp.array[int],
+    shape_material_ke: wp.array[float],
+    shape_material_kd: wp.array[float],
+    shape_material_kf: wp.array[float],
+    shape_material_mu: wp.array[float],
+    shape_material_ka: wp.array[float],
     particle_ke: float,
     particle_kd: float,
     particle_kf: float,
     particle_mu: float,
     particle_ka: float,
-    contact_count: wp.array(dtype=int),
-    contact_particle: wp.array(dtype=int),
-    contact_shape: wp.array(dtype=int),
-    contact_body_pos: wp.array(dtype=wp.vec3),
-    contact_body_vel: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
+    contact_count: wp.array[int],
+    contact_particle: wp.array[int],
+    contact_shape: wp.array[int],
+    contact_body_pos: wp.array[wp.vec3],
+    contact_body_vel: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
     contact_max: int,
     body_f_in_world_frame: bool,
     # outputs
-    particle_f: wp.array(dtype=wp.vec3),
-    body_f: wp.array(dtype=wp.spatial_vector),
+    particle_f: wp.array[wp.vec3],
+    body_f: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
 
@@ -280,21 +264,21 @@ def eval_particle_body_contact(
 @wp.kernel
 def eval_triangles_body_contact(
     num_particles: int,  # number of particles (size of contact_point)
-    x: wp.array(dtype=wp.vec3),  # position of particles
-    v: wp.array(dtype=wp.vec3),
-    indices: wp.array(dtype=int),  # triangle indices
-    body_x: wp.array(dtype=wp.vec3),  # body body positions
-    body_r: wp.array(dtype=wp.quat),
-    body_v: wp.array(dtype=wp.vec3),
-    body_w: wp.array(dtype=wp.vec3),
-    contact_body: wp.array(dtype=int),
-    contact_point: wp.array(dtype=wp.vec3),  # position of contact points relative to body
-    contact_dist: wp.array(dtype=float),
-    contact_mat: wp.array(dtype=int),
-    materials: wp.array(dtype=float),
-    #   body_f : wp.array(dtype=wp.vec3),
-    #   body_t : wp.array(dtype=wp.vec3),
-    tri_f: wp.array(dtype=wp.vec3),
+    x: wp.array[wp.vec3],  # position of particles
+    v: wp.array[wp.vec3],
+    indices: wp.array[int],  # triangle indices
+    body_x: wp.array[wp.vec3],  # body body positions
+    body_r: wp.array[wp.quat],
+    body_v: wp.array[wp.vec3],
+    body_w: wp.array[wp.vec3],
+    contact_body: wp.array[int],
+    contact_point: wp.array[wp.vec3],  # position of contact points relative to body
+    contact_dist: wp.array[float],
+    contact_mat: wp.array[int],
+    materials: wp.array[float],
+    #   body_f : wp.array[wp.vec3],
+    #   body_t : wp.array[wp.vec3],
+    tri_f: wp.array[wp.vec3],
 ):
     tid = wp.tid()
 
@@ -396,27 +380,30 @@ def eval_triangles_body_contact(
 
 @wp.kernel
 def eval_body_contact(
-    body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
-    body_com: wp.array(dtype=wp.vec3),
-    shape_material_ke: wp.array(dtype=float),
-    shape_material_kd: wp.array(dtype=float),
-    shape_material_kf: wp.array(dtype=float),
-    shape_material_ka: wp.array(dtype=float),
-    shape_material_mu: wp.array(dtype=float),
-    shape_body: wp.array(dtype=int),
-    contact_count: wp.array(dtype=int),
-    contact_point0: wp.array(dtype=wp.vec3),
-    contact_point1: wp.array(dtype=wp.vec3),
-    contact_normal: wp.array(dtype=wp.vec3),
-    contact_shape0: wp.array(dtype=int),
-    contact_shape1: wp.array(dtype=int),
-    contact_thickness0: wp.array(dtype=float),
-    contact_thickness1: wp.array(dtype=float),
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    shape_material_ke: wp.array[float],
+    shape_material_kd: wp.array[float],
+    shape_material_kf: wp.array[float],
+    shape_material_ka: wp.array[float],
+    shape_material_mu: wp.array[float],
+    shape_body: wp.array[int],
+    contact_count: wp.array[int],
+    contact_point0: wp.array[wp.vec3],
+    contact_point1: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    contact_shape0: wp.array[int],
+    contact_shape1: wp.array[int],
+    contact_margin0: wp.array[float],
+    contact_margin1: wp.array[float],
+    rigid_contact_stiffness: wp.array[float],
+    rigid_contact_damping: wp.array[float],
+    rigid_contact_friction_scale: wp.array[float],
     force_in_world_frame: bool,
     friction_smoothing: float,
     # outputs
-    body_f: wp.array(dtype=wp.spatial_vector),
+    body_f: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
 
@@ -424,15 +411,15 @@ def eval_body_contact(
     if tid >= count:
         return
 
-    # retrieve contact thickness, compute average contact material properties
+    # retrieve contact margins, compute average contact material properties
     ke = 0.0  # contact normal force stiffness
     kd = 0.0  # damping coefficient
     kf = 0.0  # friction force stiffness
     ka = 0.0  # adhesion distance
     mu = 0.0  # friction coefficient
     mat_nonzero = 0
-    thickness_a = contact_thickness0[tid]
-    thickness_b = contact_thickness1[tid]
+    margin_a = contact_margin0[tid]
+    margin_b = contact_margin1[tid]
     shape_a = contact_shape0[tid]
     shape_b = contact_shape1[tid]
     if shape_a == shape_b:
@@ -462,8 +449,18 @@ def eval_body_contact(
         ka /= float(mat_nonzero)
         mu /= float(mat_nonzero)
 
-    # contact normal in world space
-    n = contact_normal[tid]
+    # per-contact stiffness/damping/friction
+    if rigid_contact_stiffness:
+        contact_ke = rigid_contact_stiffness[tid]
+        ke = contact_ke if contact_ke > 0.0 else ke
+        contact_kd = rigid_contact_damping[tid]
+        kd = contact_kd if contact_kd > 0.0 else kd
+        contact_mu = rigid_contact_friction_scale[tid]
+        mu = mu * contact_mu if contact_mu > 0.0 else mu
+
+    # contact normal stored as A-to-B; this spring-damper kernel uses B-to-A
+    # internally so that the existing force-application signs are preserved.
+    n = -contact_normal[tid]
     bx_a = contact_point0[tid]
     bx_b = contact_point1[tid]
     r_a = wp.vec3(0.0)
@@ -471,13 +468,13 @@ def eval_body_contact(
     if body_a >= 0:
         X_wb_a = body_q[body_a]
         X_com_a = body_com[body_a]
-        bx_a = wp.transform_point(X_wb_a, bx_a) - thickness_a * n
+        bx_a = wp.transform_point(X_wb_a, bx_a) - margin_a * n
         r_a = bx_a - wp.transform_point(X_wb_a, X_com_a)
 
     if body_b >= 0:
         X_wb_b = body_q[body_b]
         X_com_b = body_com[body_b]
-        bx_b = wp.transform_point(X_wb_b, bx_b) + thickness_b * n
+        bx_b = wp.transform_point(X_wb_b, bx_b) + margin_b * n
         r_b = bx_b - wp.transform_point(X_wb_b, X_com_b)
 
     d = wp.dot(n, bx_a - bx_b)
@@ -560,7 +557,7 @@ def eval_body_contact(
 
 
 def eval_particle_contact_forces(model: Model, state: State, particle_f: wp.array):
-    if model.particle_count > 1 and model.particle_max_radius > 0.0:
+    if model.particle_count > 1 and model.particle_grid is not None:
         wp.launch(
             kernel=eval_particle_contact,
             dim=model.particle_count,
@@ -631,8 +628,11 @@ def eval_body_contact_forces(
                 contacts.rigid_contact_normal,
                 contacts.rigid_contact_shape0,
                 contacts.rigid_contact_shape1,
-                contacts.rigid_contact_thickness0,
-                contacts.rigid_contact_thickness1,
+                contacts.rigid_contact_margin0,
+                contacts.rigid_contact_margin1,
+                contacts.rigid_contact_stiffness,
+                contacts.rigid_contact_damping,
+                contacts.rigid_contact_friction,
                 force_in_world_frame,
                 friction_smoothing,
             ],

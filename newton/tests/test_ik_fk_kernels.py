@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
@@ -79,7 +67,7 @@ def _add_single_joint(builder: newton.ModelBuilder, jt: int) -> None:
     child = builder.add_link(
         xform=wp.transform_identity(),
         mass=0.1,
-        key=f"body_{jt}",
+        label=f"body_{jt}",
     )
     builder.add_shape_box(
         body=child,
@@ -225,7 +213,7 @@ def _fk_parity_for_joint(test, device, jt):
             model,
             1,
             objectives=[_NoopObjective()],
-            jacobian_mode=ik.IKJacobianMode.AUTODIFF,
+            jacobian_mode=ik.IKJacobianType.AUTODIFF,
         )
         ik_solver._fk_two_pass(model, joint_q, ik_solver.body_q, ik_solver.X_local, ik_solver.n_problems)
 

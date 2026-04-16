@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from __future__ import annotations
 
@@ -31,30 +19,38 @@ class Control:
     def __init__(self):
         self.joint_f: wp.array | None = None
         """
-        Array of generalized joint forces with shape ``(joint_dof_count,)`` and type ``float``.
+        Array of generalized joint forces [N or N·m, depending on joint type] with shape ``(joint_dof_count,)``
+        and type ``float``.
 
-        The degrees of freedom for free joints are included in this array and have the same
+        The degrees of freedom for FREE and DISTANCE joints are included in this array and have the same
         convention as the :attr:`newton.State.body_f` array where the 6D wrench is defined as
         ``(f_x, f_y, f_z, t_x, t_y, t_z)``, where ``f_x``, ``f_y``, and ``f_z`` are the components
-        of the force vector (linear) and ``t_x``, ``t_y``, and ``t_z`` are the
-        components of the torque vector (angular). Both linear forces and angular torques applied to free joints are
-        applied in world frame (same as :attr:`newton.State.body_f`).
+        of the force vector (linear) [N] and ``t_x``, ``t_y``, and ``t_z`` are the
+        components of the torque vector (angular) [N·m]. For FREE and DISTANCE joints, the wrench is applied in world
+        frame with the child body's center of mass (COM) as reference point.
         """
         self.joint_target_pos: wp.array | None = None
-        """Per-DOF position targets, shape ``(joint_dof_count,)``, type ``float`` (optional)."""
+        """Per-DOF position targets [m or rad, depending on joint type], shape ``(joint_dof_count,)``, type ``float`` (optional)."""
 
         self.joint_target_vel: wp.array | None = None
-        """Per-DOF velocity targets, shape ``(joint_dof_count,)``, type ``float`` (optional)."""
+        """Per-DOF velocity targets [m/s or rad/s, depending on joint type], shape ``(joint_dof_count,)``, type ``float`` (optional)."""
+
+        self.joint_act: wp.array | None = None
+        """Per-DOF feedforward actuation input, shape ``(joint_dof_count,)``, type ``float`` (optional).
+
+        This is an additive feedforward term used by actuators (e.g. :class:`ActuatorPD`) in their control law
+        before PD/PID correction is applied.
+        """
 
         self.tri_activations: wp.array | None = None
-        """Array of triangle element activations with shape ``(tri_count,)`` and type ``float``."""
+        """Array of triangle element activations [dimensionless] with shape ``(tri_count,)`` and type ``float``."""
 
         self.tet_activations: wp.array | None = None
-        """Array of tetrahedral element activations with shape with shape ``(tet_count,) and type ``float``."""
+        """Array of tetrahedral element activations [dimensionless] with shape ``(tet_count,)`` and type ``float``."""
 
         self.muscle_activations: wp.array | None = None
         """
-        Array of muscle activations with shape ``(muscle_count,)`` and type ``float``.
+        Array of muscle activations [dimensionless, 0 to 1] with shape ``(muscle_count,)`` and type ``float``.
 
         .. note::
             Support for muscle dynamics is not yet implemented.
@@ -75,3 +71,16 @@ class Control:
             self.joint_target_pos.zero_()
         if self.joint_target_vel is not None:
             self.joint_target_vel.zero_()
+        if self.joint_act is not None:
+            self.joint_act.zero_()
+        self._clear_namespaced_arrays()
+
+    def _clear_namespaced_arrays(self) -> None:
+        """Clear all wp.array attributes in namespaced containers (e.g., control.mujoco.ctrl)."""
+        from .model import Model  # noqa: PLC0415
+
+        for attr in self.__dict__.values():
+            if isinstance(attr, Model.AttributeNamespace):
+                for value in attr.__dict__.values():
+                    if isinstance(value, wp.array):
+                        value.zero_()

@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 ###########################################################################
 # Example IK Custom (custom collision objective + sphere gizmo)
@@ -22,6 +10,7 @@
 # - Adds a custom CollisionSphereAvoidObjective (softplus penalty) for the EE
 # - Adds gizmos for the end-effector target and the obstacle sphere
 # - Re-solves IK every frame from the latest gizmo transforms
+# - EE target gizmo snaps back to solved TCP pose on release
 #
 # Command: python -m newton.examples ik_custom
 ###########################################################################
@@ -39,17 +28,17 @@ import newton.utils
 # -------------------------------------------------------------------------
 @wp.kernel
 def _collision_residuals(
-    body_q: wp.array2d(dtype=wp.transform),  # (batch_rows, n_bodies)
-    obstacle_centers: wp.array1d(dtype=wp.vec3),  # (n_problems,)
-    obstacle_radii: wp.array1d(dtype=wp.float32),  # (n_problems,)
+    body_q: wp.array2d[wp.transform],  # (batch_rows, n_bodies)
+    obstacle_centers: wp.array[wp.vec3],  # (n_problems,)
+    obstacle_radii: wp.array[wp.float32],  # (n_problems,)
     link_index: int,
     link_offset: wp.vec3,
     link_radius: float,
     start_idx: int,  # start row in the global residual vector
     weight: float,
-    problem_idx: wp.array1d(dtype=wp.int32),  # (batch_rows,)
+    problem_idx: wp.array[wp.int32],  # (batch_rows,)
     # outputs
-    residuals: wp.array2d(dtype=wp.float32),  # (batch_rows, total_residuals)
+    residuals: wp.array2d[wp.float32],  # (batch_rows, total_residuals)
 ):
     row_idx = wp.tid()
     base = problem_idx[row_idx]
@@ -65,7 +54,7 @@ def _collision_residuals(
     # Softplus of penetration depth to keep it smooth
     dist = wp.length(ee_pos - c)
     delta = (link_radius + r_obs) - dist
-    margin = 0.05
+    margin = 0.12
     pen = wp.log(1.0 + wp.exp(delta / margin)) * margin
 
     residuals[row_idx, start_idx] = weight * pen
@@ -76,7 +65,7 @@ def _update_center_target(
     problem_idx: int,
     new_center: wp.vec3,
     # outputs
-    centers: wp.array1d(dtype=wp.vec3),  # (n_problems,)
+    centers: wp.array[wp.vec3],  # (n_problems,)
 ):
     centers[problem_idx] = new_center
 
@@ -142,7 +131,7 @@ class CollisionSphereAvoidObjective(ik.IKObjective):
 
 
 class Example:
-    def __init__(self, viewer):
+    def __init__(self, viewer, args):
         # frame timing
         self.fps = 60
         self.frame_dt = 1.0 / self.fps
@@ -171,6 +160,15 @@ class Example:
         self.model = builder.finalize()
         self.viewer.set_model(self.model)
 
+        # Set camera to view the scene
+        self.viewer.set_camera(
+            pos=wp.vec3(0.0, -2.0, 1.0),
+            pitch=0.0,
+            yaw=90.0,
+        )
+        if hasattr(self.viewer, "camera") and hasattr(self.viewer.camera, "fov"):
+            self.viewer.camera.fov = 90.0
+
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
 
@@ -181,8 +179,8 @@ class Example:
         self.links_to_check_collision = [
             ("fr3_link5", 7, 0.06),  # (name, index, radius)
             ("fr3_link7", 9, 0.06),
-            ("fr3_hand_tcp", 10, 0.05),
-            ("fr3_link3", 5, 0.08),  # elbow block: frequent contact risk during reach-backs and around-table moves
+            ("fr3_hand_tcp", 10, 0.10),
+            ("fr3_link3", 5, 0.10),  # elbow block: frequent contact risk during reach-backs and around-table moves
             ("fr3_link4", 6, 0.07),  # proximal forearm: fills gap between elbow and your existing link5 sphere
             ("fr3_link6", 8, 0.06),  # wrist housing: catches close passes near fixtures when orienting the tool
             # Optional but helpful if space is tight around the shoulder/torso:
@@ -203,13 +201,13 @@ class Example:
             return wp.vec4(q[0], q[1], q[2], q[3])
 
         # Position & rotation objectives ------------------------------------
-        self.pos_obj = ik.IKPositionObjective(
+        self.pos_obj = ik.IKObjectivePosition(
             link_index=self.ee_index,
             link_offset=wp.vec3(0.0, 0.0, 0.0),
             target_positions=wp.array([wp.transform_get_translation(self.ee_tf)], dtype=wp.vec3),
         )
 
-        self.rot_obj = ik.IKRotationObjective(
+        self.rot_obj = ik.IKObjectiveRotation(
             link_index=self.ee_index,
             link_offset_rotation=wp.quat_identity(),
             target_rotations=wp.array([_q2v4(wp.transform_get_rotation(self.ee_tf))], dtype=wp.vec4),
@@ -229,19 +227,19 @@ class Example:
                     link_radius=link_radius,
                     obstacle_centers=self.obstacle_centers,
                     obstacle_radii=self.obstacle_radii,
-                    weight=10.0,
+                    weight=3.0,
                 )
             )
 
         # Joint limit objective (starts after collisions)
-        self.obj_joint_limits = ik.IKJointLimitObjective(
+        self.obj_joint_limits = ik.IKObjectiveJointLimit(
             joint_limit_lower=self.model.joint_limit_lower,
             joint_limit_upper=self.model.joint_limit_upper,
             weight=10.0,
         )
 
         # Variables the solver will update
-        self.joint_q = wp.array(self.model.joint_q, shape=(1, self.model.joint_coord_count))
+        self.joint_q = self.model.joint_q.reshape((1, self.model.joint_coord_count))
 
         self.ik_iters = 10
         self.ik_solver = ik.IKSolver(
@@ -252,7 +250,7 @@ class Example:
             h0_scale=1.0,
             line_search_alphas=[0.01, 0.1, 0.5, 0.75, 1.0],
             history_len=12,
-            jacobian_mode=ik.IKJacobianMode.MIXED,
+            jacobian_mode=ik.IKJacobianType.MIXED,
         )
 
         self.capture()
@@ -273,8 +271,10 @@ class Example:
 
     def _push_targets_from_gizmos(self):
         """Read gizmo-updated transforms and push into IK objectives."""
-        # Update EE target
-        self.pos_obj.set_target_position(0, wp.transform_get_translation(self.ee_tf))
+        # Update EE target (clamp z to ground)
+        pos = wp.transform_get_translation(self.ee_tf)
+        pos = wp.vec3(pos[0], pos[1], max(pos[2], 0.11))
+        self.pos_obj.set_target_position(0, pos)
         q = wp.transform_get_rotation(self.ee_tf)
         self.rot_obj.set_target_rotation(0, wp.vec4(q[0], q[1], q[2], q[3]))
 
@@ -304,12 +304,13 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
 
-        # Register EE and obstacle gizmos
-        self.viewer.log_gizmo("target_tcp", self.ee_tf)
-        self.viewer.log_gizmo("obstacle_sphere", self.sphere_tf)
-
-        # Visualize the current articulated state + world-attached shapes
+        # Visualize the current articulated state + world-attached shapes.
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
+        body_q_np = self.state.body_q.numpy()
+
+        # Register EE and obstacle gizmos
+        self.viewer.log_gizmo("target_tcp", self.ee_tf, snap_to=wp.transform(*body_q_np[self.ee_index]))
+        self.viewer.log_gizmo("obstacle_sphere", self.sphere_tf)
 
         self.viewer.log_state(self.state)
 
@@ -320,5 +321,5 @@ class Example:
 if __name__ == "__main__":
     # Parse arguments and initialize viewer
     viewer, args = newton.examples.init()
-    example = Example(viewer)
+    example = Example(viewer, args)
     newton.examples.run(example, args)

@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from ._src.geometry import (
     BroadPhaseAllPairs,
@@ -29,18 +17,19 @@ from ._src.geometry import (
     collide_sphere_capsule,
     collide_sphere_cylinder,
     collide_sphere_sphere,
-    generate_terrain_grid,
-    heightfield_to_mesh,
 )
-from ._src.geometry.inertia import compute_shape_inertia, transform_inertia
-from ._src.geometry.sdf_utils import SDFData, compute_sdf, create_empty_sdf_data
-from ._src.geometry.utils import remesh_mesh
+from ._src.geometry.inertia import compute_inertia_shape, transform_inertia
+from ._src.geometry.kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_mesh, sdf_plane, sdf_sphere
+from ._src.geometry.narrow_phase import NarrowPhase
+from ._src.geometry.sdf_hydroelastic import HydroelasticSDF
+from ._src.geometry.sdf_utils import compute_offset_mesh, create_empty_sdf_data
 
 __all__ = [
     "BroadPhaseAllPairs",
     "BroadPhaseExplicit",
     "BroadPhaseSAP",
-    "SDFData",
+    "HydroelasticSDF",
+    "NarrowPhase",
     "collide_box_box",
     "collide_capsule_box",
     "collide_capsule_capsule",
@@ -53,11 +42,15 @@ __all__ = [
     "collide_sphere_capsule",
     "collide_sphere_cylinder",
     "collide_sphere_sphere",
-    "compute_sdf",
-    "compute_shape_inertia",
+    "compute_inertia_shape",
+    "compute_offset_mesh",
     "create_empty_sdf_data",
-    "generate_terrain_grid",
-    "heightfield_to_mesh",
-    "remesh_mesh",
+    "sdf_box",
+    "sdf_capsule",
+    "sdf_cone",
+    "sdf_cylinder",
+    "sdf_mesh",
+    "sdf_plane",
+    "sdf_sphere",
     "transform_inertia",
 ]

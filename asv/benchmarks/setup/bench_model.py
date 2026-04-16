@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import gc
 import os
@@ -37,7 +25,7 @@ from newton.viewer import ViewerGL
 
 class KpiInitializeModel:
     params = (["humanoid", "g1", "cartpole"], [8192])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
@@ -45,12 +33,12 @@ class KpiInitializeModel:
     min_run_count = 1
     timeout = 3600
 
-    def setup(self, robot, num_worlds):
+    def setup(self, robot, world_count):
         wp.init()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_initialize_model(self, robot, num_worlds):
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+    def time_initialize_model(self, robot, world_count):
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         _model = builder.finalize()
@@ -59,7 +47,7 @@ class KpiInitializeModel:
 
 class KpiInitializeSolver:
     params = (["humanoid", "g1", "cartpole", "ant"], [8192])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
@@ -67,41 +55,41 @@ class KpiInitializeSolver:
     min_run_count = 1
     timeout = 3600
 
-    def setup(self, robot, num_worlds):
+    def setup(self, robot, world_count):
         wp.init()
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         self._model = builder.finalize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_initialize_solver(self, robot, num_worlds):
+    def time_initialize_solver(self, robot, world_count):
         self._solver = Example.create_solver(self._model, robot, use_mujoco_cpu=False)
         wp.synchronize_device()
 
-    def teardown(self, robot, num_worlds):
+    def teardown(self, robot, world_count):
         del self._solver
         del self._model
 
 
 class KpiInitializeViewerGL:
     params = (["g1"], [8192])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
     number = 1
     min_run_count = 1
 
-    def setup(self, robot, num_worlds):
+    def setup(self, robot, world_count):
         wp.init()
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         self._model = builder.finalize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_initialize_renderer(self, robot, num_worlds):
+    def time_initialize_renderer(self, robot, world_count):
         # Setting up the renderer
         self.renderer = ViewerGL(headless=True)
         self.renderer.set_model(self._model)
@@ -109,13 +97,13 @@ class KpiInitializeViewerGL:
         wp.synchronize_device()
         self.renderer.close()
 
-    def teardown(self, robot, num_worlds):
+    def teardown(self, robot, world_count):
         del self._model
 
 
 class FastInitializeModel:
     params = (["humanoid", "g1", "cartpole"], [256])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
@@ -124,23 +112,25 @@ class FastInitializeModel:
 
     def setup_cache(self):
         # Load a small model to cache the kernels
-        builder = Example.create_model_builder("cartpole", 1, randomize=False, seed=123)
-        model = builder.finalize(device="cpu")
-        del model
+        for robot in self.params[0]:
+            builder = Example.create_model_builder(robot, 1, randomize=False, seed=123)
+            model = builder.finalize(device="cpu")
+            del model
+            del builder
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_initialize_model(self, robot, num_worlds):
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+    def time_initialize_model(self, robot, world_count):
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         _model = builder.finalize()
         wp.synchronize_device()
 
-    def peakmem_initialize_model_cpu(self, robot, num_worlds):
+    def peakmem_initialize_model_cpu(self, robot, world_count):
         gc.collect()
 
         with wp.ScopedDevice("cpu"):
-            builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+            builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
             # finalize model
             model = builder.finalize()
@@ -150,48 +140,48 @@ class FastInitializeModel:
 
 class FastInitializeSolver:
     params = (["humanoid", "g1", "cartpole"], [256])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
     number = 1
     min_run_count = 1
 
-    def setup(self, robot, num_worlds):
+    def setup(self, robot, world_count):
         wp.init()
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         self._model = builder.finalize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_initialize_solver(self, robot, num_worlds):
+    def time_initialize_solver(self, robot, world_count):
         self._solver = Example.create_solver(self._model, robot, use_mujoco_cpu=False)
         wp.synchronize_device()
 
-    def teardown(self, robot, num_worlds):
+    def teardown(self, robot, world_count):
         del self._solver
         del self._model
 
 
 class FastInitializeViewerGL:
     params = (["g1"], [256])
-    param_names = ["robot", "num_worlds"]
+    param_names = ["robot", "world_count"]
 
     rounds = 1
     repeat = 3
     number = 1
     min_run_count = 1
 
-    def setup(self, robot, num_worlds):
+    def setup(self, robot, world_count):
         wp.init()
-        builder = Example.create_model_builder(robot, num_worlds, randomize=True, seed=123)
+        builder = Example.create_model_builder(robot, world_count, randomize=True, seed=123)
 
         # finalize model
         self._model = builder.finalize()
 
     @skip_benchmark_if(wp.get_cuda_device_count() == 0)
-    def time_initialize_renderer(self, robot, num_worlds):
+    def time_initialize_renderer(self, robot, world_count):
         # Setting up the renderer
         self.renderer = ViewerGL(headless=True)
         self.renderer.set_model(self._model)
@@ -199,7 +189,7 @@ class FastInitializeViewerGL:
         wp.synchronize_device()
         self.renderer.close()
 
-    def teardown(self, robot, num_worlds):
+    def teardown(self, robot, world_count):
         del self._model
 
 
@@ -219,7 +209,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        "-b", "--bench", default=None, action="append", choices=benchmark_list.keys(), help="Run a single benchmark."
+        "-b",
+        "--bench",
+        default=None,
+        action="append",
+        choices=benchmark_list.keys(),
+        help="Run a specific benchmark; may be repeated to run multiple (e.g., --bench A --bench B).",
     )
     args = parser.parse_known_args()[0]
 
